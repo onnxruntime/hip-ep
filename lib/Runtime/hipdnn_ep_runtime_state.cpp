@@ -498,6 +498,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->provider_options = nullptr;
   state->device_error_flag = nullptr;
   state->host_error_flag = 0;
+  state->execution_status = 0;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
   state->seqlens_k_cached_valid = false;
@@ -2113,9 +2114,23 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
     return -1;
   }
   state->host_error_flag = 0;
+  state->execution_status = 0;
   hipError_t err =
       hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
+  if (err != hipSuccess)
+    state->execution_status = HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+  return (err == hipSuccess) ? 0 : HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+}
+
+void hipdnn_ep_state_record_execution_status(RuntimeState *state, int status) {
+  if (state && status != 0 &&
+      state->execution_status != HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED)
+    state->execution_status =
+        status == HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED ? status : -1;
+}
+
+int hipdnn_ep_state_get_execution_status(RuntimeState *state) {
+  return state ? state->execution_status : -1;
 }
 
 int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
@@ -2146,17 +2161,28 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
   hipError_t err =
       hipMemcpyAsync(&device_error, state->device_error_flag, sizeof(int),
                      hipMemcpyDeviceToHost, state->stream);
-  if (err != hipSuccess)
-    return -1;
+  if (err != hipSuccess) {
+    state->execution_status = HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+    return HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+  }
   err = hipStreamSynchronize(state->stream);
-  if (err != hipSuccess)
-    return -1;
+  if (err != hipSuccess) {
+    state->execution_status = HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+    return HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+  }
+  if (state->execution_status == HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED)
+    return state->execution_status;
+
   err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  if (err != hipSuccess)
-    return -1;
+  if (err != hipSuccess) {
+    state->execution_status = HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+    return HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
+  }
+  const int status = state->execution_status;
   const int host_error = state->host_error_flag;
+  state->execution_status = 0;
   state->host_error_flag = 0;
-  return host_error != 0 ? host_error : device_error;
+  return status != 0 ? status : host_error != 0 ? host_error : device_error;
 }
 
 } // extern "C"

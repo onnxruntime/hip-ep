@@ -89,12 +89,23 @@ int main() {
   }
   state.host_error_flag = -7;
   fail_sync_after = 0;
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
   CHECK(state.host_error_flag == -7);
+  CHECK(hipdnn_ep_state_get_execution_status(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+  state.host_error_flag = -7;
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -7);
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
   fail_sync_after = -1;
   CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+  hipdnn_ep_state_record_execution_status(&state, -1);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -1);
+  CHECK(hipdnn_ep_state_get_execution_status(&state) == 0);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
 
   constexpr int64_t count = 512;
   constexpr int64_t capacity = 1024;
@@ -144,8 +155,10 @@ int main() {
   CHECK(hipdnn_ep_op_state_construct_matmul_nbits(&state, 0) == 0);
   const auto matmul = [&](int slot, int64_t scale_bytes, const void *zeros) {
     return wrap_matmul_nbits(&state, slot, data, data, data, zeros, nullptr,
-                             nullptr, values, 16, 64, 64, 1, 4, 32, 2, 1,
-                             scale_bytes);
+                             nullptr, values, 16, 64, 64, 1, 4, 32,
+                             HIPDNN_EP_DATATYPE_HALF, 1,
+                             scale_bytes == 4 ? HIPDNN_EP_DATATYPE_FLOAT
+                                              : HIPDNN_EP_DATATYPE_HALF);
   };
   CHECK(matmul(1, 2, nullptr) != 0);
   CHECK(state.host_error_flag != 0);
