@@ -65,6 +65,14 @@ struct PagedAttentionToHip : RewritePattern {
     const auto tableType = typeAt(7);
     const auto cosType = typeAt(8);
     const auto sinType = typeAt(9);
+    if (op->getNumOperands() == 17 &&
+        !isa<NoneType>(op->getOperand(16).getType())) {
+      auto metadata = typeAt(16);
+      if (!metadata || metadata.getRank() != 1 ||
+          !metadata.getElementType().isInteger(32) ||
+          metadata.getDimSize(0) != 3)
+        return reject("optional attention metadata must be int32[3]");
+    }
     if (!queryType || queryType.getRank() != 2 ||
         !queryType.getElementType().isF16() ||
         queryType.getDimSize(1) != (heads + 2 * kvHeads) * 64 || !cacheType ||
@@ -87,8 +95,9 @@ struct PagedAttentionToHip : RewritePattern {
       if (!type ||
           (i == 0 && (type.getRank() != 2 || !type.getElementType().isF16() ||
                       type.getDimSize(1) != heads * 64 ||
-                      (!type.isDynamicDim(0) && !queryType.isDynamicDim(0) &&
-                       type.getDimSize(0) != queryType.getDimSize(0)))) ||
+                      (!type.isDynamicDim(0) &&
+                       (queryType.isDynamicDim(0) ||
+                        type.getDimSize(0) != queryType.getDimSize(0))))) ||
           (i != 0 && type != cacheType))
         return reject("present cache shape must match past cache");
       types.push_back(type);

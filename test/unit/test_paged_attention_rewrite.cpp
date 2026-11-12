@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -25,7 +26,19 @@ int main() {
   RewritePatternSet patterns(&ctx);
   hip::populatePagedAttentionConversionPatterns(patterns, &ctx);
   int failures = 0;
-  for (unsigned index : {1u, 2u}) {
+  enum class Case {
+    KeyCacheShape,
+    ValueCacheRank,
+    DynamicQueryStaticOutput,
+    StaticRowMismatch,
+    MetadataType,
+    MetadataShape,
+    ValidStatic
+  };
+  for (Case test :
+       {Case::KeyCacheShape, Case::ValueCacheRank,
+        Case::DynamicQueryStaticOutput, Case::StaticRowMismatch,
+        Case::MetadataType, Case::MetadataShape, Case::ValidStatic}) {
     auto module = parseSourceString<ModuleOp>(R"mlir(
       func.func @main_graph(%ctx: !hip.context, %query: tensor<2x192xf16>,
                            %cache: tensor<1x256x1x64xf16>,
@@ -55,10 +68,44 @@ int main() {
     });
     if (!attention)
       return 1;
-    attention->getResult(index).setType(
-        index == 1 ? Type(RankedTensorType::get({2, 256, 1, 64},
-                                                Float16Type::get(&ctx)))
-                   : Type(UnrankedTensorType::get(Float16Type::get(&ctx))));
+    const char *description = nullptr;
+    switch (test) {
+    case Case::KeyCacheShape:
+      description = "invalid key cache shape";
+      attention->getResult(1).setType(
+          RankedTensorType::get({2, 256, 1, 64}, Float16Type::get(&ctx)));
+      break;
+    case Case::ValueCacheRank:
+      description = "unranked value cache";
+      attention->getResult(2).setType(
+          UnrankedTensorType::get(Float16Type::get(&ctx)));
+      break;
+    case Case::DynamicQueryStaticOutput:
+      description = "dynamic query with static output rows";
+      attention->getOperand(0).setType(RankedTensorType::get(
+          {ShapedType::kDynamic, 192}, Float16Type::get(&ctx)));
+      attention->getResult(0).setType(
+          RankedTensorType::get({1, 64}, Float16Type::get(&ctx)));
+      break;
+    case Case::StaticRowMismatch:
+      description = "mismatched static output rows";
+      attention->getResult(0).setType(
+          RankedTensorType::get({1, 64}, Float16Type::get(&ctx)));
+      break;
+    case Case::MetadataType:
+    case Case::MetadataShape: {
+      description = test == Case::MetadataType ? "invalid metadata type"
+                                               : "invalid metadata shape";
+      SmallVector<Value> extra(6, attention->getOperand(1));
+      extra.push_back(
+          attention->getOperand(test == Case::MetadataType ? 0 : 6));
+      attention->insertOperands(10, extra);
+      break;
+    }
+    case Case::ValidStatic:
+      description = "matching static output rows";
+      break;
+    }
     auto snapshot = [&] {
       std::string text;
       llvm::raw_string_ostream stream(text);
@@ -77,9 +124,12 @@ int main() {
         failed(patterns.getNativePatterns().front()->matchAndRewrite(attention,
                                                                      rewriter));
     const bool unchanged = snapshot() == before;
-    const bool passed = rejected && errors == 1 && unchanged;
-    std::printf("%s invalid cache result %u leaves IR unchanged\n",
-                passed ? "PASS" : "FAIL", index);
+    const bool expectRejection = test != Case::ValidStatic;
+    const bool passed = expectRejection ? rejected && errors == 1 && unchanged
+                                        : !rejected && errors == 0 &&
+                                              succeeded(verify(*module));
+    std::printf("%s %s: %s\n", passed ? "PASS" : "FAIL", description,
+                expectRejection ? "rejected without IR mutation" : "accepted");
     failures += !passed;
   }
   return failures ? 1 : 0;

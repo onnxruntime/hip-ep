@@ -18,6 +18,11 @@ must be a power of two from 16 through 4,096. Separate Q/K/V, local windows, sin
 QK normalization inputs, softcap, and quantized/rotated KV are rejected rather
 than silently approximated.
 
+Output rows must match query rows; a dynamic query row count requires a dynamic
+output row count. Optional `int32[3]` `attention_metadata` is accepted as a
+performance hint. This path derives execution bounds from tensor shapes and
+device sequence lengths instead of consuming that hint.
+
 The caller must bind each present cache to the corresponding past allocation.
 Before mutation, a validation kernel checks sequence/page bounds, metadata
 extents, duplicate pages, and cross-request writes that would overlap a peer's

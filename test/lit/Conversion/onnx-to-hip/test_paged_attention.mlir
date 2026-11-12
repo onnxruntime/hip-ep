@@ -11,18 +11,21 @@ module {
       %value: tensor<32x256x2x64xf16>,
       %cumulative: tensor<?xi32>, %past: tensor<?xi32>,
       %table: tensor<?x16xi32>,
-      %cos: tensor<4096x32xf16>, %sin: tensor<4096x32xf16>)
+      %cos: tensor<4096x32xf16>, %sin: tensor<4096x32xf16>,
+      %metadata: tensor<3xi32>)
       -> (tensor<?x896xf16>, tensor<32x256x2x64xf16>, tensor<32x256x2x64xf16>) {
     %none = "onnx.NoValue"() {value} : () -> none
     %result:3 = "onnx.Custom"(%query, %none, %none, %key, %value,
-                             %cumulative, %past, %table, %cos, %sin)
+                             %cumulative, %past, %table, %cos, %sin,
+                             %none, %none, %none, %none, %none, %none, %metadata)
         <{function_name = "PagedAttention"}>
         {domain_name = "com.microsoft", num_heads = 14 : si64,
          kv_num_heads = 2 : si64, do_rotary = 1 : si64}
         : (tensor<?x1152xf16>, none, none,
            tensor<32x256x2x64xf16>, tensor<32x256x2x64xf16>,
            tensor<?xi32>, tensor<?xi32>, tensor<?x16xi32>,
-           tensor<4096x32xf16>, tensor<4096x32xf16>)
+           tensor<4096x32xf16>, tensor<4096x32xf16>,
+           none, none, none, none, none, none, tensor<3xi32>)
         -> (tensor<?x896xf16>, tensor<32x256x2x64xf16>, tensor<32x256x2x64xf16>)
     // CHECK-LABEL: func.func @main_graph
     // CHECK: tensor.dim
