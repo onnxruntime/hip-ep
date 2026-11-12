@@ -4,6 +4,7 @@
  */
 #include "hip_custom_kernels.h"
 #include "runtime_state_internal.h"
+#include "transient_arena.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -14,13 +15,14 @@
 
 namespace {
 
-enum class Failure { None, Allocation, Drain, Free, Launch };
+enum class Failure { None, Allocation, Drain, DeviceDrain, Free, Launch };
 
 struct FakeDevice {
   Failure failure{Failure::None};
   std::map<void *, size_t> allocations;
   std::vector<std::string> calls;
   bool pending{};
+  hipError_t last_error{hipSuccess};
   int failures{};
 } device;
 
@@ -137,8 +139,8 @@ void test_dequantization_growth_and_failure() {
       CHECK(output == state.matmul_nbits_fp16_scratch);
       CHECK(state.matmul_nbits_fp16_scratch_size == 1024);
       CHECK(device.calls ==
-            (std::vector<std::string>{"drain", "free", "allocate", "launch",
-                                      "status"}));
+            (std::vector<std::string>{"drain", "free", "allocate", "status",
+                                      "launch", "status"}));
     }
     release(state);
   }
@@ -156,8 +158,62 @@ void test_launch_failure_and_independent_buffers() {
   device.failure = Failure::None;
   device.calls.clear();
   CHECK(dequantize(state) == state.matmul_nbits_fp16_scratch);
-  CHECK(device.calls == (std::vector<std::string>{"launch", "status"}));
+  CHECK(device.calls ==
+        (std::vector<std::string>{"status", "launch", "status"}));
   CHECK(state.workspace != state.matmul_nbits_fp16_scratch);
+  release(state);
+}
+
+void test_stale_launch_error() {
+  auto state = make_state();
+  CHECK(dequantize(state) != nullptr);
+  device.last_error = 999;
+  device.calls.clear();
+  CHECK(dequantize(state) == state.matmul_nbits_fp16_scratch);
+  CHECK(state.host_error_flag == 0);
+  CHECK(device.calls ==
+        (std::vector<std::string>{"status", "launch", "status"}));
+  release(state);
+}
+
+void test_arena_failure_preserves_ownership() {
+  auto state = make_state();
+  hipdnn_ep::TransientArena arena;
+  constexpr size_t block = hipdnn_ep::TransientArenaAllocator::kAlign;
+  void *backing = nullptr;
+  CHECK(hipMalloc(&backing, 2 * block) == hipSuccess);
+  arena.base = static_cast<char *>(backing);
+  arena.blocks.init(2 * block);
+  state.transient_arena = &arena;
+
+  CHECK(hipdnn_ep_state_ensure_workspace(&state, 128) == 0);
+  void *previous = state.workspace;
+  device.failure = Failure::DeviceDrain;
+  CHECK(hipdnn_ep_state_ensure_workspace(&state, 129) != 0);
+  CHECK(state.workspace == previous && state.workspace_size == 128);
+  CHECK(arena.blocks.used() == block && arena.live == block);
+  void *other = nullptr;
+  CHECK(hipdnn_ep_state_device_alloc(&state, &other, block) == hipSuccess);
+  CHECK(other != previous);
+  CHECK(arena.blocks.used() == 2 * block && arena.live == 2 * block);
+
+  void *fallback = nullptr;
+  CHECK(hipdnn_ep_state_device_alloc(&state, &fallback, block) == hipSuccess);
+  device.failure = Failure::Free;
+  CHECK(hipdnn_ep_state_device_free(&state, fallback) != hipSuccess);
+  CHECK(arena.direct_live.count(fallback) == 1 && arena.live == 3 * block);
+  device.failure = Failure::None;
+  CHECK(hipdnn_ep_state_device_free(&state, fallback) == hipSuccess);
+  CHECK(hipdnn_ep_state_device_free(&state, other) == hipSuccess);
+  CHECK(hipdnn_ep_state_ensure_workspace(&state, 129) == 0);
+  CHECK(state.workspace_size == 192);
+  CHECK(arena.blocks.used() == block && arena.live == block);
+  CHECK(hipdnn_ep_state_device_free(&state, state.workspace) == hipSuccess);
+  CHECK(arena.blocks.used() == 0 && arena.live == 0);
+  state.workspace = nullptr;
+  state.workspace_size = 0;
+  state.transient_arena = nullptr;
+  CHECK(hipFree(backing) == hipSuccess);
   release(state);
 }
 
@@ -193,13 +249,23 @@ extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipDeviceSynchronize() {
+  device.calls.emplace_back("device_drain");
+  if (device.failure == Failure::DeviceDrain)
+    return 999;
+  device.pending = false;
+  return hipSuccess;
+}
+
 extern "C" const char *hipGetErrorString(hipError_t error) {
   return error == 2 ? "injected allocation failure" : "injected device failure";
 }
 
 extern "C" hipError_t hipGetLastError() {
   device.calls.emplace_back("status");
-  return device.failure == Failure::Launch ? 999 : hipSuccess;
+  const hipError_t result = device.last_error;
+  device.last_error = hipSuccess;
+  return result;
 }
 
 extern "C" void hip_matmul_nbits_dequant_b_fp16(void *stream, const void *,
@@ -211,23 +277,18 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(void *stream, const void *,
   CHECK(device.allocations.at(output) >=
         static_cast<size_t>(n) * static_cast<size_t>(k) * sizeof(uint16_t));
   CHECK(group_size == 32);
-  if (device.failure != Failure::Launch)
+  if (device.failure == Failure::Launch)
+    device.last_error = 999;
+  else
     device.pending = true;
-}
-
-hipError_t hipdnn_ep_state_device_alloc(RuntimeState *, void **pointer,
-                                        size_t bytes) {
-  return hipMalloc(pointer, bytes);
-}
-
-hipError_t hipdnn_ep_state_device_free(RuntimeState *, void *pointer) {
-  return hipFree(pointer);
 }
 
 int main() {
   test_workspace_growth_and_failure();
   test_dequantization_growth_and_failure();
   test_launch_failure_and_independent_buffers();
+  test_stale_launch_error();
+  test_arena_failure_preserves_ownership();
   if (device.failures) {
     fprintf(stderr, "device scratch: %d failures\n", device.failures);
     return 1;

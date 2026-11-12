@@ -81,13 +81,7 @@ struct PagedAttentionToHip : RewritePattern {
       return reject("requires FP16 packed QKV/cache with head size 64, FP16 "
                     "rotary tables and int32 metadata");
 
-    auto context = getContextArg(op, rewriter);
-    if (failed(context))
-      return reject("missing runtime context");
     SmallVector<Type> types;
-    SmallVector<Value> operands{*context};
-    for (unsigned index : {0u, 3u, 4u, 5u, 6u, 7u, 8u, 9u})
-      operands.push_back(op->getOperand(index));
     for (unsigned i = 0; i < 3; ++i) {
       auto type = dyn_cast<RankedTensorType>(op->getResult(i).getType());
       if (!type ||
@@ -98,9 +92,17 @@ struct PagedAttentionToHip : RewritePattern {
           (i != 0 && type != cacheType))
         return reject("present cache shape must match past cache");
       types.push_back(type);
-      operands.push_back(createEmptyTensor(rewriter, op->getLoc(), type,
-                                           op->getOperand(i == 0 ? 0 : i + 2)));
     }
+    auto context = getContextArg(op, rewriter);
+    if (failed(context))
+      return reject("missing runtime context");
+    SmallVector<Value> operands{*context};
+    for (unsigned index : {0u, 3u, 4u, 5u, 6u, 7u, 8u, 9u})
+      operands.push_back(op->getOperand(index));
+    for (unsigned i = 0; i < 3; ++i)
+      operands.push_back(createEmptyTensor(rewriter, op->getLoc(),
+                                           cast<RankedTensorType>(types[i]),
+                                           op->getOperand(i == 0 ? 0 : i + 2)));
     OperationState state(op->getLoc(), "hip.paged_attention");
     state.addOperands(operands);
     state.addTypes(types);

@@ -13,6 +13,16 @@
 
 message(STATUS "Configuring MLIR dialect/pass unit tests")
 
+add_executable(test-paged-attention-rewrite test_paged_attention_rewrite.cpp)
+target_compile_features(test-paged-attention-rewrite PRIVATE cxx_std_17)
+target_include_directories(test-paged-attention-rewrite PRIVATE
+  ${CMAKE_SOURCE_DIR}/lib/Conversion/OnnxToHip
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+)
+target_link_libraries(test-paged-attention-rewrite PRIVATE OnnxToHip MLIRParser)
+add_test(NAME PagedAttentionRewriteUnit COMMAND test-paged-attention-rewrite)
+
 add_executable(test-runtime-lowering-contracts
   test_runtime_lowering_contracts.cpp
 )

@@ -105,22 +105,7 @@ constexpr size_t kArenaMinConstantsMiB = 256;
 constexpr size_t kMaxArenaMiB = 4096;
 constexpr double kMiB = 1024.0 * 1024.0;
 
-struct TransientArena {
-  char *base = nullptr;
-  hipdnn_ep::TransientArenaAllocator blocks;
-  std::unordered_map<void *, size_t> direct_live; // fallback ptr -> bytes
-  size_t live = 0, live_hwm = 0;                  // arena + fallback
-
-  void track(const RuntimeState *state, size_t bytes, bool in_arena) {
-    live += bytes;
-    live_hwm = std::max(live_hwm, live);
-    RUNTIME_DEBUG_LOG("[ARENA] alloc state=%p bytes=%zu %s arena_used_mb=%.1f "
-                      "live_mb=%.1f hwm_mb=%.1f\n",
-                      static_cast<const void *>(state), bytes,
-                      in_arena ? "arena" : "fallback", blocks.used() / kMiB,
-                      live / kMiB, live_hwm / kMiB);
-  }
-};
+using hipdnn_ep::TransientArena;
 
 // Returns the arena size in MiB; malformed values keep the default.
 size_t transient_arena_mib(RuntimeState *state, size_t constants_bytes) {
@@ -182,51 +167,6 @@ void destroy_transient_arena(RuntimeState *state) {
   state->transient_arena = nullptr;
 }
 } // namespace
-
-hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
-                                        size_t size) {
-  auto *a =
-      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
-  if (!a)
-    return hipMalloc(ptr, size);
-  if (std::optional<size_t> offset = a->blocks.allocate(size)) {
-    *ptr = a->base + *offset;
-    a->track(state, a->blocks.blockBytes(*offset), true);
-    return hipSuccess;
-  }
-  const hipError_t err = hipMalloc(ptr, size);
-  if (err == hipSuccess) {
-    a->direct_live[*ptr] = size;
-    a->track(state, size, false);
-  }
-  return err;
-}
-
-hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr) {
-  if (!ptr)
-    return hipSuccess;
-  auto *a =
-      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
-  if (!a)
-    return hipFree(ptr);
-  char *p = static_cast<char *>(ptr);
-  if (p < a->base || p >= a->base + a->blocks.size()) {
-    auto d = a->direct_live.find(ptr);
-    if (d != a->direct_live.end()) {
-      a->live -= d->second;
-      a->direct_live.erase(d);
-    }
-    return hipFree(ptr);
-  }
-  // hipFree synchronizes the device; returning a block must too, or the next
-  // allocation could hand the region to new work while kernels still use it.
-  const hipError_t err = hipDeviceSynchronize();
-  const size_t offset = static_cast<size_t>(p - a->base);
-  a->live -= a->blocks.blockBytes(offset);
-  if (!a->blocks.release(offset))
-    fprintf(stderr, "[ARENA] free of %p: not a live arena block\n", ptr);
-  return err;
-}
 
 namespace {
 void unmap_file(void *view, size_t size) {

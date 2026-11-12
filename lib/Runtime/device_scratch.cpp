@@ -5,6 +5,7 @@
 #include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
+#include "transient_arena.h"
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
 #include "hip_custom_kernels.h"
@@ -54,6 +55,69 @@ int grow_device_buffer(RuntimeState *state, hipStream_t stream, void *&buffer,
 }
 
 } // namespace
+
+void hipdnn_ep::TransientArena::track(const void *state, size_t bytes,
+                                      bool in_arena) {
+  live += bytes;
+  live_hwm = std::max(live_hwm, live);
+  constexpr double kMiB = 1024.0 * 1024.0;
+  RUNTIME_DEBUG_LOG("[ARENA] alloc state=%p bytes=%zu %s arena_used_mb=%.1f "
+                    "live_mb=%.1f hwm_mb=%.1f\n",
+                    state, bytes, in_arena ? "arena" : "fallback",
+                    blocks.used() / kMiB, live / kMiB, live_hwm / kMiB);
+}
+
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size) {
+  auto *a =
+      state ? static_cast<hipdnn_ep::TransientArena *>(state->transient_arena)
+            : nullptr;
+  if (!a)
+    return hipMalloc(ptr, size);
+  if (std::optional<size_t> offset = a->blocks.allocate(size)) {
+    *ptr = a->base + *offset;
+    a->track(state, a->blocks.blockBytes(*offset), true);
+    return hipSuccess;
+  }
+  const hipError_t err = hipMalloc(ptr, size);
+  if (err == hipSuccess) {
+    a->direct_live[*ptr] = size;
+    a->track(state, size, false);
+  }
+  return err;
+}
+
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr) {
+  if (!ptr)
+    return hipSuccess;
+  auto *a =
+      state ? static_cast<hipdnn_ep::TransientArena *>(state->transient_arena)
+            : nullptr;
+  if (!a)
+    return hipFree(ptr);
+  char *p = static_cast<char *>(ptr);
+  if (p < a->base || p >= a->base + a->blocks.size()) {
+    const hipError_t err = hipFree(ptr);
+    if (err != hipSuccess)
+      return err;
+    auto d = a->direct_live.find(ptr);
+    if (d != a->direct_live.end()) {
+      a->live -= d->second;
+      a->direct_live.erase(d);
+    }
+    return hipSuccess;
+  }
+  // hipFree synchronizes the device; returning a block must too, or the next
+  // allocation could hand the region to new work while kernels still use it.
+  const hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess)
+    return err;
+  const size_t offset = static_cast<size_t>(p - a->base);
+  a->live -= a->blocks.blockBytes(offset);
+  if (!a->blocks.release(offset))
+    fprintf(stderr, "[ARENA] free of %p: not a live arena block\n", ptr);
+  return err;
+}
 
 void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
   return state ? state->workspace : nullptr;
@@ -121,6 +185,7 @@ const void *hipdnn_ep_dequant_matmul_nbits_fp16(
                       bytes);
 
   void *output = state->matmul_nbits_fp16_scratch;
+  (void)hipGetLastError();
   hip_matmul_nbits_dequant_b_fp16(stream, weights, scales, zeros, output, n, k,
                                   group_size);
   const hipError_t status = hipGetLastError();
