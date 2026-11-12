@@ -221,6 +221,7 @@ def test_paged_attention_aliases(paged_session, prefixes, lengths):
         "cumulative",
         "context",
         "write_alias",
+        "cross_cache_alias",
         "cumulative_shape",
         "table_shape",
         "value_shape",
@@ -244,9 +245,14 @@ def test_paged_attention_rejects_before_mutation(paged_session, invalid):
         inputs["table"] = inputs["table"][:1].copy()
     elif invalid == "value_shape":
         inputs["past_value"] = inputs["past_value"][:-1].copy()
-    else:
+    elif invalid == "sine_shape":
         inputs["sin"] = inputs["sin"][:-1].copy()
     binding, tensors, output = bind(session, device, inputs)
+    if invalid == "cross_cache_alias":
+        binding.bind_ortvalue_input("past_value", tensors["past_key"])
+        binding.bind_ortvalue_output("present_value", tensors["past_key"])
+        tensors["past_value"] = tensors["past_key"]
+        inputs["past_value"] = inputs["past_key"]
     with pytest.raises(RuntimeError, match="inference_compute .* failed with code: -1"):
         session.run_with_iobinding(binding)
     np.testing.assert_array_equal(tensors["past_key"].numpy(), inputs["past_key"])

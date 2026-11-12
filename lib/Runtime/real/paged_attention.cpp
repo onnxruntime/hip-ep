@@ -46,9 +46,11 @@ int wrap_paged_attention(RuntimeState *state, void *query, void *past_key,
   if (batch <= 0 || batch >= INT64_MAX || cumulative_count != batch + 1 ||
       table_rows != batch || value_blocks != num_blocks ||
       value_block_size != block_size || sin_length != rotary_length ||
-      past_key != present_key || past_value != present_value) {
+      past_key == past_value || past_key != present_key ||
+      past_value != present_value) {
     std::fprintf(stderr,
-                 "HIP PagedAttention requires matching metadata/cache extents "
+                 "HIP PagedAttention requires matching metadata/cache extents, "
+                 "separate key/value buffers, "
                  "and caller-bound past/present cache aliases\n");
     return RecordFailure(stream, error_flag);
   }

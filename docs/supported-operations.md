@@ -24,6 +24,7 @@ performance hint. This path derives execution bounds from tensor shapes and
 device sequence lengths instead of consuming that hint.
 
 The caller must bind each present cache to the corresponding past allocation.
+Binding the same buffer as both key and value cache is rejected before mutation.
 Before mutation, a validation kernel checks sequence/page bounds, metadata
 extents, duplicate pages, and cross-request writes that would overlap a peer's
 live state. Shared read-only prefix pages are allowed. Malformed metadata returns
