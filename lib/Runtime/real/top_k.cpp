@@ -252,7 +252,9 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
   void *workspace = nullptr;
   size_t workspace_bytes = 0;
   const size_t needed = hip_top_k_workspace_bytes(axis, rank, x_shape, k_val);
-  if (needed > 0 && hipdnn_ep_state_ensure_workspace(state, needed) == 0) {
+  if (needed > 0) {
+    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0)
+      return finish(-1);
     workspace = hipdnn_ep_state_get_workspace(state);
     workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
   }

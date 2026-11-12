@@ -565,9 +565,14 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
         return std::string(b);
       },
       state);
+  const auto finish = [&](int status) {
+    if (status != 0 && state)
+      state->host_error_flag = -1;
+    return status;
+  };
   if (!state || !A || !B || !scales || !output) {
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
-    return -1;
+    return finish(-1);
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
@@ -582,12 +587,12 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
     fprintf(stderr, "wrap_matmul_nbits: null stream\n");
-    return -1;
+    return finish(-1);
   }
 
   if (g_idx) {
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
-    return -1;
+    return finish(-1);
   }
 
   // ONNX MatMulNBits allows `scales` to be fp16 or fp32 independent of the
@@ -602,27 +607,27 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     if (block_size <= 0) {
       fprintf(stderr,
               "wrap_matmul_nbits: fp32 scales require block_size > 0\n");
-      return -1;
+      return finish(-1);
     }
     MatmulNbitsState *mst =
         MatmulNbitsState::get_op_state(state, op_state_slot);
     if (!mst) {
       fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
               op_state_slot);
-      return -1;
+      return finish(-1);
     }
     const int64_t ngk = (K + block_size - 1) / block_size;
     const void *scales_fp16 =
         lookup_or_convert_scale_fp16(mst, stream, scales, N * ngk);
     if (!scales_fp16)
-      return -1;
+      return finish(-1);
     scales = scales_fp16;
   } else if (scale_elem_size != 2) {
     fprintf(stderr,
             "wrap_matmul_nbits: unsupported scale_elem_size %lld (expected "
             "2=fp16 or 4=fp32)\n",
             (long long)scale_elem_size);
-    return -1;
+    return finish(-1);
   }
 
   // Pre-unpack zero_points (asym path) using this instance's pointer-keyed
@@ -637,7 +642,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     if (!mst) {
       fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
               op_state_slot);
-      return -1;
+      return finish(-1);
     }
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
     // ONNX MatMulNBits packs zero_points at `bits` bits: 2-per-byte nibbles
@@ -660,7 +665,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
             : hipdnn_ep_real::lookup_or_unpack_zp_u8(
                   mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
-      return -1;
+      return finish(-1);
     // Every M>1 bits=4 path consumes the FP16 zero_points, not the uint8 one:
     //   - WMMA fast path   (batch==1, K%32==0, M>=8)
     //   - WMMA K-pad path  (batch==1, K%32!=0, M>=8)  <-- also needs it
@@ -678,7 +683,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)
-        return -1;
+        return finish(-1);
     }
   }
 
@@ -759,13 +764,13 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (!mst) {
         fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
                 op_state_slot);
-        return -1;
+        return finish(-1);
       }
       const void *b_fp16 = hipdnn_ep_dequant_matmul_nbits_fp16(
           state, stream, B, scales, zeros_fp16, static_cast<int>(N),
           static_cast<int>(K), static_cast<int>(block_size));
       if (!b_fp16)
-        return -1;
+        return finish(-1);
       result = matmul_nbits_prefill_hipblaslt(mst, state, A, b_fp16, bias,
                                               output, M, N, K);
       goto cleanup;
@@ -825,5 +830,5 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                              zp_elem_size, pre_zp_u8, pre_zp_fp16));
 
 cleanup:
-  return result;
+  return finish(result);
 }

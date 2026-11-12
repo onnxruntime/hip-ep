@@ -19,9 +19,11 @@ QK normalization inputs, softcap, and quantized/rotated KV are rejected rather
 than silently approximated.
 
 Output rows must match query rows; a dynamic query row count requires a dynamic
-output row count. Optional `int32[3]` `attention_metadata` is accepted as a
+output row count. Optional `int32[2]` or `int32[3]` `attention_metadata` is accepted as a
 performance hint. This path derives execution bounds from tensor shapes and
 device sequence lengths instead of consuming that hint.
+Nonzero rotary offsets, value head sizes other than 0 (default) or 64, and
+negative or non-finite attention scales are rejected during conversion.
 
 The caller must bind each present cache to the corresponding past allocation.
 Binding the same buffer as both key and value cache is rejected before mutation.
@@ -120,7 +122,7 @@ with and without bias against the ORT CPU implementation.
 | NonZero | Custom HIP kernel |
 | Gather | Custom HIP kernel |
 | GatherElements | Custom HIP kernel |
-| TopK | Custom HIP kernel |
+| TopK | Custom HIP kernel, with host fallback for unsupported device shapes/types. A failed device-workspace request is an execution error, not a fallback trigger, so synchronization/free failures cannot be hidden. |
 | RandomNormalLike | Custom HIP kernel. Output f16, bf16, f32, and f64; rank 0–8. The input contributes only its shape, including dynamic dimensions. `seed` makes the fill reproducible inside hip-ep; the generator is not bit-identical to another runtime. An absent seed comes from the clock. |
 | ArgMax | Custom HIP kernel. f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64; rank 1–8. ui32 and ui64 are not supported. An empty reduction axis fails. NaN outranks every number; the first NaN wins unless select_last_index keeps the last. |
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |

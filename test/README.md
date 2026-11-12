@@ -63,6 +63,14 @@ Test-specific CMake flags:
 | `BUILD_HIP_UNIT_TESTS` | ON | Register LIT and E2E tests with CTest |
 | `BUILD_MOCK_RUNTIME` | ON in CMake; `build.py` passes OFF unless `--mock` | Build the mock runtime (no GPU required) instead of the real one |
 
+On Linux, a real-runtime build with vendor BLAS and
+`BUILD_HIP_KERNEL_UNIT_TESTS=ON` also provides `test-runtime-errors`.
+It executes the production runtime bitcode natively on a HIP GPU with targeted
+allocation/synchronization fault injection. Run it with
+`ctest --test-dir <build> -R '^RuntimeErrorPropagation$' --output-on-failure`.
+It covers terminal MatMulNBits errors, TopK workspace failure/recovery, and
+host/device error-flag clearing. It does not benchmark kernels.
+
 To disable HIP unit tests (LIT + E2E) during the build:
 
 ```bash

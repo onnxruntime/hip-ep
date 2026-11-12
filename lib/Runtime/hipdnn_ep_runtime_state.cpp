@@ -2136,23 +2136,21 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
             "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
     return -1;
   }
-  if (state->host_error_flag != 0)
-    return state->host_error_flag;
-
-  int host_error = 0;
+  int device_error = 0;
   hipError_t err =
-      hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
+      hipMemcpyAsync(&device_error, state->device_error_flag, sizeof(int),
                      hipMemcpyDeviceToHost, state->stream);
   if (err != hipSuccess)
     return -1;
   err = hipStreamSynchronize(state->stream);
   if (err != hipSuccess)
     return -1;
-  if (host_error != 0)
-    return host_error;
-
   err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
+  if (err != hipSuccess)
+    return -1;
+  const int host_error = state->host_error_flag;
+  state->host_error_flag = 0;
+  return host_error != 0 ? host_error : device_error;
 }
 
 } // extern "C"

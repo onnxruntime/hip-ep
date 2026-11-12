@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <cmath>
+
 namespace mlir::hip {
 namespace {
 
@@ -42,10 +44,14 @@ struct PagedAttentionToHip : RewritePattern {
     };
     const int64_t heads = integer("num_heads", 0);
     const int64_t kvHeads = integer("kv_num_heads", 0);
+    const float scale = floating("scale", 0.125f);
     if (heads <= 0 || heads > 65535 || kvHeads <= 0 || kvHeads > heads ||
         heads % kvHeads != 0 || integer("is_causal", 1) != 1 ||
         integer("do_rotary", 0) != 1 || integer("rotary_interleaved", 0) != 0 ||
-        integer("local_window_size", -1) != -1 || floating("softcap", 0) != 0)
+        integer("local_window_size", -1) != -1 || floating("softcap", 0) != 0 ||
+        integer("rotary_offset", 0) != 0 ||
+        (integer("v_head_size", 0) != 0 && integer("v_head_size", 0) != 64) ||
+        !std::isfinite(scale) || scale < 0)
       return reject("requires grouped heads, full causal attention and "
                     "non-interleaved fused RoPE");
     for (StringRef key :
@@ -70,8 +76,9 @@ struct PagedAttentionToHip : RewritePattern {
       auto metadata = typeAt(16);
       if (!metadata || metadata.getRank() != 1 ||
           !metadata.getElementType().isInteger(32) ||
-          metadata.getDimSize(0) != 3)
-        return reject("optional attention metadata must be int32[3]");
+          (metadata.getDimSize(0) != 2 && metadata.getDimSize(0) != 3))
+        return reject(
+            "optional attention metadata must be int32[2] or int32[3]");
     }
     if (!queryType || queryType.getRank() != 2 ||
         !queryType.getElementType().isF16() ||
@@ -117,8 +124,7 @@ struct PagedAttentionToHip : RewritePattern {
     state.addTypes(types);
     state.addAttribute("num_heads", rewriter.getI64IntegerAttr(heads));
     state.addAttribute("kv_num_heads", rewriter.getI64IntegerAttr(kvHeads));
-    state.addAttribute("scale",
-                       rewriter.getF32FloatAttr(floating("scale", 0.125f)));
+    state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
     rewriter.replaceOp(op, rewriter.create(state)->getResults());
     return success();
   }

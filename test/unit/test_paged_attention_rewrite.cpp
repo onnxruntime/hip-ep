@@ -14,6 +14,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
 using namespace mlir;
@@ -33,12 +34,21 @@ int main() {
     StaticRowMismatch,
     MetadataType,
     MetadataShape,
+    MetadataTwo,
+    MetadataThree,
+    RotaryOffset,
+    ValueHeadSize,
+    NegativeScale,
+    InfiniteScale,
+    NanScale,
     ValidStatic
   };
-  for (Case test :
-       {Case::KeyCacheShape, Case::ValueCacheRank,
-        Case::DynamicQueryStaticOutput, Case::StaticRowMismatch,
-        Case::MetadataType, Case::MetadataShape, Case::ValidStatic}) {
+  for (Case test : {Case::KeyCacheShape, Case::ValueCacheRank,
+                    Case::DynamicQueryStaticOutput, Case::StaticRowMismatch,
+                    Case::MetadataType, Case::MetadataShape, Case::MetadataTwo,
+                    Case::MetadataThree, Case::RotaryOffset,
+                    Case::ValueHeadSize, Case::NegativeScale,
+                    Case::InfiniteScale, Case::NanScale, Case::ValidStatic}) {
     auto module = parseSourceString<ModuleOp>(R"mlir(
       func.func @main_graph(%ctx: !hip.context, %query: tensor<2x192xf16>,
                            %cache: tensor<1x256x1x64xf16>,
@@ -105,6 +115,44 @@ int main() {
     case Case::ValidStatic:
       description = "matching static output rows";
       break;
+    case Case::MetadataTwo:
+    case Case::MetadataThree: {
+      description = test == Case::MetadataTwo ? "two-element metadata"
+                                              : "three-element metadata";
+      auto function = cast<func::FuncOp>(attention->getParentOp());
+      auto type = RankedTensorType::get({test == Case::MetadataTwo ? 2 : 3},
+                                        IntegerType::get(&ctx, 32));
+      Value metadata = function.front().addArgument(type, attention->getLoc());
+      function.setType(FunctionType::get(&ctx,
+                                         function.front().getArgumentTypes(),
+                                         function.getResultTypes()));
+      SmallVector<Value> extra(6, attention->getOperand(1));
+      extra.push_back(metadata);
+      attention->insertOperands(10, extra);
+      break;
+    }
+    case Case::RotaryOffset:
+    case Case::ValueHeadSize:
+      description = test == Case::RotaryOffset ? "unsupported rotary offset"
+                                               : "unsupported value head size";
+      attention->setAttr(test == Case::RotaryOffset ? "rotary_offset"
+                                                    : "v_head_size",
+                         IntegerAttr::get(IntegerType::get(&ctx, 64), 8));
+      break;
+    case Case::NegativeScale:
+    case Case::InfiniteScale:
+    case Case::NanScale:
+      description = test == Case::NegativeScale   ? "negative scale"
+                    : test == Case::InfiniteScale ? "infinite scale"
+                                                  : "NaN scale";
+      attention->setAttr(
+          "scale",
+          FloatAttr::get(Float32Type::get(&ctx),
+                         test == Case::NegativeScale ? -1.0f
+                         : test == Case::InfiniteScale
+                             ? std::numeric_limits<float>::infinity()
+                             : std::numeric_limits<float>::quiet_NaN()));
+      break;
     }
     auto snapshot = [&] {
       std::string text;
@@ -124,7 +172,9 @@ int main() {
         failed(patterns.getNativePatterns().front()->matchAndRewrite(attention,
                                                                      rewriter));
     const bool unchanged = snapshot() == before;
-    const bool expectRejection = test != Case::ValidStatic;
+    const bool expectRejection = test != Case::ValidStatic &&
+                                 test != Case::MetadataTwo &&
+                                 test != Case::MetadataThree;
     const bool passed = expectRejection ? rejected && errors == 1 && unchanged
                                         : !rejected && errors == 0 &&
                                               succeeded(verify(*module));

@@ -11,6 +11,46 @@
 
 message(STATUS "Configuring runtime unit tests")
 
+# Native execution of the production runtime bitcode with targeted HIP fault
+# injection. Linux interposition is deliberate; this opt-in test needs a GPU.
+if(BUILD_HIP_KERNEL_UNIT_TESTS AND NOT BUILD_MOCK_RUNTIME
+   AND NOT HIPDNN_EP_DISABLE_VENDOR_BLAS AND UNIX AND NOT APPLE)
+  find_package(hipblaslt REQUIRED)
+  if(TARGET clang)
+    set(_runtime_error_clang $<TARGET_FILE:clang>)
+  else()
+    find_program(_runtime_error_clang NAMES clang
+      HINTS ${LLVM_TOOLS_BINARY_DIR} REQUIRED)
+  endif()
+  set(_runtime_error_object ${CMAKE_CURRENT_BINARY_DIR}/runtime_errors.o)
+  set(_runtime_error_bitcode ${CMAKE_BINARY_DIR}/lib/Runtime/runtime.bc)
+  add_custom_command(
+    OUTPUT ${_runtime_error_object}
+    COMMAND ${_runtime_error_clang} -c -O1 -ffunction-sections -fdata-sections
+            ${_runtime_error_bitcode} -o ${_runtime_error_object}
+    DEPENDS HipRuntime ${_runtime_error_bitcode}
+    VERBATIM)
+  set_source_files_properties(${_runtime_error_object}
+    PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+  add_executable(test-runtime-errors test_runtime_errors.cpp ${_runtime_error_object})
+  target_compile_features(test-runtime-errors PRIVATE cxx_std_17)
+  target_compile_definitions(test-runtime-errors PRIVATE
+    HIPDNN_EP_RT_NO_EXPORT)
+  target_include_directories(test-runtime-errors PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/real)
+  target_link_libraries(test-runtime-errors PRIVATE
+    hip::host roc::hipblaslt hipdnn-ep-tls ${CMAKE_DL_LIBS})
+  list(GET HIP_ARCHITECTURES 0 _runtime_error_arch)
+  target_link_libraries(test-runtime-errors PRIVATE custom_kernels_${_runtime_error_arch})
+  target_link_options(test-runtime-errors PRIVATE -Wl,--gc-sections)
+  add_test(NAME RuntimeErrorPropagation COMMAND test-runtime-errors)
+  set_tests_properties(RuntimeErrorPropagation PROPERTIES
+    LABELS "gpu" TIMEOUT 60
+    ENVIRONMENT "HIPDNN_EP_MATMUL_DP4A=0;HIPDNN_EP_AUTOTUNE=0;HIPDNN_EP_PERF=0")
+endif()
+
 # Compiles output_allocator.cpp natively (the same source that also becomes
 # runtime bitcode) so the allocator contract is tested directly.
 add_executable(test-output-allocator
