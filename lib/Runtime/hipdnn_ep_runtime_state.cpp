@@ -105,22 +105,7 @@ constexpr size_t kArenaMinConstantsMiB = 256;
 constexpr size_t kMaxArenaMiB = 4096;
 constexpr double kMiB = 1024.0 * 1024.0;
 
-struct TransientArena {
-  char *base = nullptr;
-  hipdnn_ep::TransientArenaAllocator blocks;
-  std::unordered_map<void *, size_t> direct_live; // fallback ptr -> bytes
-  size_t live = 0, live_hwm = 0;                  // arena + fallback
-
-  void track(const RuntimeState *state, size_t bytes, bool in_arena) {
-    live += bytes;
-    live_hwm = std::max(live_hwm, live);
-    RUNTIME_DEBUG_LOG("[ARENA] alloc state=%p bytes=%zu %s arena_used_mb=%.1f "
-                      "live_mb=%.1f hwm_mb=%.1f\n",
-                      static_cast<const void *>(state), bytes,
-                      in_arena ? "arena" : "fallback", blocks.used() / kMiB,
-                      live / kMiB, live_hwm / kMiB);
-  }
-};
+using hipdnn_ep::TransientArena;
 
 // Returns the arena size in MiB; malformed values keep the default.
 size_t transient_arena_mib(RuntimeState *state, size_t constants_bytes) {
@@ -182,51 +167,6 @@ void destroy_transient_arena(RuntimeState *state) {
   state->transient_arena = nullptr;
 }
 } // namespace
-
-hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
-                                        size_t size) {
-  auto *a =
-      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
-  if (!a)
-    return hipMalloc(ptr, size);
-  if (std::optional<size_t> offset = a->blocks.allocate(size)) {
-    *ptr = a->base + *offset;
-    a->track(state, a->blocks.blockBytes(*offset), true);
-    return hipSuccess;
-  }
-  const hipError_t err = hipMalloc(ptr, size);
-  if (err == hipSuccess) {
-    a->direct_live[*ptr] = size;
-    a->track(state, size, false);
-  }
-  return err;
-}
-
-hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr) {
-  if (!ptr)
-    return hipSuccess;
-  auto *a =
-      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
-  if (!a)
-    return hipFree(ptr);
-  char *p = static_cast<char *>(ptr);
-  if (p < a->base || p >= a->base + a->blocks.size()) {
-    auto d = a->direct_live.find(ptr);
-    if (d != a->direct_live.end()) {
-      a->live -= d->second;
-      a->direct_live.erase(d);
-    }
-    return hipFree(ptr);
-  }
-  // hipFree synchronizes the device; returning a block must too, or the next
-  // allocation could hand the region to new work while kernels still use it.
-  const hipError_t err = hipDeviceSynchronize();
-  const size_t offset = static_cast<size_t>(p - a->base);
-  a->live -= a->blocks.blockBytes(offset);
-  if (!a->blocks.release(offset))
-    fprintf(stderr, "[ARENA] free of %p: not a live arena block\n", ptr);
-  return err;
-}
 
 namespace {
 void unmap_file(void *view, size_t size) {
@@ -520,6 +460,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->matmul_nbits_fp16_scratch = nullptr;
+  state->matmul_nbits_fp16_scratch_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
   // Start with no output allocator (null context + callback). The EP installs
@@ -553,6 +495,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gqa_autotune_policy = nullptr;
   state->provider_options = nullptr;
   state->device_error_flag = nullptr;
+  state->host_error_flag = 0;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
   state->seqlens_k_cached_valid = false;
@@ -1121,6 +1064,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free shared workspace (if allocated)
   if (state->workspace) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
+  }
+  if (state->matmul_nbits_fp16_scratch) {
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_nbits_fp16_scratch));
   }
 
   // Free qmoe device scratch + pinned host mirror (if allocated)
@@ -1726,70 +1673,6 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
 }
 
 //===----------------------------------------------------------------------===//
-// Shared Workspace Support
-//===----------------------------------------------------------------------===//
-
-void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
-  return state ? state->workspace : nullptr;
-}
-
-size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
-  return state ? state->workspace_size : 0;
-}
-
-int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  if (state->workspace_size >= needed_size)
-    return 0;
-
-  // Amortize growth: when enlarging an existing workspace, round the new
-  // size up to at least 1.5x the current buffer. Callers whose request
-  // size grows monotonically by a small increment per inference (e.g. the
-  // GQA decode path, which sizes S buffers to B*H*total_seq and adds B*H
-  // elements per token) would otherwise trigger a hipStreamSynchronize +
-  // hipFree + hipMalloc cycle on every decode step; with the 1.5x factor
-  // that drops to O(log N) reallocations over the whole generation.
-  // Cold-start (no existing workspace) keeps the exact requested size so
-  // warmup doesn't silently double large initial allocations.
-  size_t alloc_size = needed_size;
-  if (state->workspace_size > 0) {
-    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  // Grow: free old, allocate new.
-  // Sync the stream first to ensure no in-flight kernel is still using the
-  // old workspace buffer (prevents use-after-free on async GPU execution).
-  if (state->workspace) {
-    if (state->stream) {
-      HIP_CLEANUP(hipStreamSynchronize(state->stream));
-    }
-    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
-    state->workspace = nullptr;
-    state->workspace_size = 0;
-  }
-
-  if (hipdnn_ep_state_device_alloc(state, &state->workspace, alloc_size) !=
-      hipSuccess) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        alloc_size);
-    std::abort();
-  }
-
-  state->workspace_size = alloc_size;
-  RUNTIME_DEBUG_LOG(
-      "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
-      alloc_size, needed_size);
-  return 0;
-}
-
-//===----------------------------------------------------------------------===//
 // QMoE scratch helpers (device + pinned-host)
 //===----------------------------------------------------------------------===//
 //
@@ -2223,6 +2106,7 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
     fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
     return -1;
   }
+  state->host_error_flag = 0;
   hipError_t err =
       hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
   return (err == hipSuccess) ? 0 : -1;
@@ -2252,21 +2136,21 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
             "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
     return -1;
   }
-
-  int host_error = 0;
+  int device_error = 0;
   hipError_t err =
-      hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
+      hipMemcpyAsync(&device_error, state->device_error_flag, sizeof(int),
                      hipMemcpyDeviceToHost, state->stream);
   if (err != hipSuccess)
     return -1;
   err = hipStreamSynchronize(state->stream);
   if (err != hipSuccess)
     return -1;
-  if (host_error != 0)
-    return host_error;
-
   err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
+  if (err != hipSuccess)
+    return -1;
+  const int host_error = state->host_error_flag;
+  state->host_error_flag = 0;
+  return host_error != 0 ? host_error : device_error;
 }
 
 } // extern "C"

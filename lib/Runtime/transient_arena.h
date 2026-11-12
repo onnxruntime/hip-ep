@@ -10,6 +10,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <unordered_map>
 
 namespace hipdnn_ep {
 
@@ -103,6 +104,15 @@ private:
   std::map<size_t, size_t> free_; // offset -> bytes
   std::map<size_t, size_t> live_; // offset -> bytes
   size_t used_ = 0, hwm_ = 0, hits_ = 0, misses_ = 0, miss_bytes_ = 0;
+};
+
+struct TransientArena {
+  char *base = nullptr;
+  TransientArenaAllocator blocks;
+  std::unordered_map<void *, size_t> direct_live;
+  size_t live = 0, live_hwm = 0;
+
+  void track(const void *state, size_t bytes, bool in_arena);
 };
 
 } // namespace hipdnn_ep
