@@ -109,7 +109,7 @@ ort.InferenceSession(path, sess_options=config)
     assert message in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("hidden", [33, 5120])
+@pytest.mark.parametrize("hidden", [33, 63, 64, 65, 5120, 5121, 8196])
 @pytest.mark.parametrize("skip", [False, True])
 def test_bfloat16_rms_norm(model_runner, hidden, skip):
     names = ["X", "scale", *(["skip", "bias"] if skip else [])]
@@ -520,7 +520,7 @@ class TestSimplifiedLayerNorm:
 
 
 class TestSkipSimplifiedLayerNorm:
-    @pytest.mark.parametrize("hidden", [33, 896])
+    @pytest.mark.parametrize("hidden", [33, 63, 64, 65, 896, 5121, 8196])
     @pytest.mark.parametrize("dtype", [np.float16, np.float32])
     @pytest.mark.parametrize("with_bias", [False, True])
     def test_optional_residual_preserves_normalized_output(
