@@ -134,7 +134,7 @@ def test_qwen_w4a16_runtime_error_reaches_caller(w4a16_weights, request):
         for dtype in (np.float16, np.float32, bfloat16)
         for k, n in ((896, 1152), (896, 896), (896, 4864), (4864, 896), (896, 151936))
     ]
-    + [(dtype, 883, 263) for dtype in (np.float32, bfloat16)],
+    + [(dtype, 883, 263) for dtype in (np.float16, np.float32, bfloat16)],
 )
 def test_qwen_w4a16_dynamic_shapes(w4a16_weights, request, tmp_path, dtype, k, n):
     weights, device, provider = w4a16_weights
@@ -251,7 +251,7 @@ def test_qwen_w4a16_dynamic_shapes(w4a16_weights, request, tmp_path, dtype, k, n
 @pytest.mark.parametrize("k", [32, 65])
 @pytest.mark.parametrize("scale_dtype", [np.float16, np.float32])
 @pytest.mark.parametrize("offsets", [(0, 0), (4, 1)])
-@pytest.mark.parametrize("activation_dtype", [np.float32, bfloat16])
+@pytest.mark.parametrize("activation_dtype", [np.float16, np.float32, bfloat16])
 def test_fp32_small_m_element_aligned_inputs(
     w4a16_weights, k, scale_dtype, offsets, activation_dtype
 ):
@@ -271,13 +271,15 @@ def test_fp32_small_m_element_aligned_inputs(
         )
     )
     kernels = ctypes.CDLL(str(Path(library).resolve()))
-    native_bf16 = activation_dtype == bfloat16
+    native_typed = activation_dtype != np.float32
     kernel = (
         kernels.hip_matmul_nbits_gemv_typed
-        if native_bf16
+        if native_typed
         else kernels.hip_matmul_nbits_gemv_fp32
     )
-    kernel.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * (5 if native_bf16 else 4)
+    kernel.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * (
+        5 if native_typed else 4
+    )
     kernel.restype = ctypes.c_int
     stream = ctypes.c_void_p()
     assert hip.hipStreamCreate(ctypes.byref(stream)) == 0
@@ -291,6 +293,7 @@ def test_fp32_small_m_element_aligned_inputs(
         dense = ((codes.astype(np.float32) - 8) * scales[:, :, None]).reshape(n, -1)[
             :, :k
         ]
+        dense = dense.astype(activation_dtype).astype(np.float32)
         for rows in (1, 3, 16):
             source = rng.uniform(-1, 1, (rows, k)).astype(activation_dtype)
             buffers = []
@@ -309,7 +312,7 @@ def test_fp32_small_m_element_aligned_inputs(
                 buffers.append(value)
                 pointers.append(ctypes.c_void_p(value.data_ptr() + offset))
             output = ort.OrtValue.ortvalue_from_shape_and_type(
-                (rows, n), np.uint16 if native_bf16 else np.float32, memory_info=memory
+                (rows, n), np.uint16 if native_typed else np.float32, memory_info=memory
             )
             assert pointers[0].value % 16 == offsets[0]
             assert pointers[1].value % 4 == offsets[1]
@@ -323,8 +326,11 @@ def test_fp32_small_m_element_aligned_inputs(
                     n,
                     k,
                     *(
-                        (5, 1 if scale_dtype == np.float16 else 0)
-                        if native_bf16
+                        (
+                            1 if activation_dtype == np.float16 else 5,
+                            1 if scale_dtype == np.float16 else 0,
+                        )
+                        if native_typed
                         else (np.dtype(scale_dtype).itemsize,)
                     ),
                 )
@@ -332,13 +338,13 @@ def test_fp32_small_m_element_aligned_inputs(
             )
             assert hip.hipStreamSynchronize(stream) == 0
             actual = output.numpy()
-            if native_bf16:
-                actual = actual.view(bfloat16).astype(np.float32)
+            if native_typed:
+                actual = actual.view(activation_dtype).astype(np.float32)
             np.testing.assert_allclose(
                 actual,
                 source.astype(np.float32) @ dense.T,
-                atol=0.002 if native_bf16 else 3e-5,
-                rtol=0.004 if native_bf16 else 3e-5,
+                atol=0.002 if native_typed else 3e-5,
+                rtol=0.004 if native_typed else 3e-5,
             )
     finally:
         assert hip.hipStreamDestroy(stream) == 0

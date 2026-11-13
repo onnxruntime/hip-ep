@@ -637,7 +637,10 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   if ((data_type == HIPDNN_EP_DATATYPE_FLOAT ||
-       data_type == HIPDNN_EP_DATATYPE_BFLOAT16) &&
+       data_type == HIPDNN_EP_DATATYPE_BFLOAT16 ||
+       (data_type == HIPDNN_EP_DATATYPE_HALF &&
+        scale_data_type == HIPDNN_EP_DATATYPE_HALF && M > 0 &&
+        batch_count > 0 && M <= 16 / batch_count)) &&
       bits == 4 && block_size == 32 && !zero_points) {
     if (M <= 0 || N <= 0 || N > INT_MAX || K <= 0 || K > INT_MAX ||
         batch_count <= 0 || M > INT_MAX / batch_count ||
