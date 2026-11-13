@@ -2947,7 +2947,7 @@ HIP_KERNEL_API int hip_matmul_nbits_dequant_b_fp32(
  * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
  * zeros_fp16 are fp16 [N, ceil(K/group_size)]; zeros_fp16 may be null (ONNX
  * 4-bit default zero-point 8). */
-/* Raw symmetric INT4/block-32, FP32 or BF16 activations/output/bias.
+/* Raw symmetric INT4/block-32, FP16/FP32/BF16 activations/output/bias.
  * Dtypes are HIP_DTYPE_*; scales may be FP16, BF16 or FP32. */
 HIP_KERNEL_API int hip_matmul_nbits_gemv_typed(
     void *stream, const void *activations, const void *weights,

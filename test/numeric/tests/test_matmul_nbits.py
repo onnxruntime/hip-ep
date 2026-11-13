@@ -37,10 +37,171 @@ Llama-3.1-8B AWQ-int4-g128 (block_size = 128, accuracy_level = 4):
 
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
+
+
+@pytest.mark.parametrize("rows,k", [(1, 32), (7, 33), (7, 256), (16, 31)])
+@pytest.mark.parametrize(
+    "dtype,element_type,positive_bits",
+    [
+        (
+            np.float16,
+            TensorProto.FLOAT16,
+            [0x0001, 0x03FF, 0x0400, 0x1001, 0x3555, 0x3C01, 0x4800],
+        ),
+        (
+            bfloat16,
+            TensorProto.BFLOAT16,
+            [0x0080, 0x1001, 0x3555, 0x3F81, 0x4800, 0x7001],
+        ),
+    ],
+    ids=["fp16", "bf16"],
+)
+def test_int4_weight_rounding(
+    model_runner, rows, k, dtype, element_type, positive_bits
+):
+    scale_bits = np.array(
+        positive_bits,
+        dtype=np.uint16,
+    )
+    scale_values = np.concatenate((scale_bits, scale_bits | np.uint16(0x8000))).view(
+        dtype
+    )
+    byte = np.tile(np.arange(256, dtype=np.uint8), len(scale_values))
+    scale = np.repeat(scale_values, 256)
+    n, groups = len(byte), (k + 31) // 32
+    group_bytes = byte[:, None] ^ np.arange(groups, dtype=np.uint8)[None, :]
+    packed = np.broadcast_to(group_bytes[:, :, None], (n, groups, 16)).copy()
+    scales = np.stack([np.roll(scale, group) for group in range(groups)], axis=1)
+    column_bytes = np.repeat(group_bytes, 32, axis=1)[:, :k]
+    codes = np.where(np.arange(k) % 2, column_bytes >> 4, column_bytes & 15)
+    dense = (codes.astype(np.float32) - 8) * np.repeat(
+        scales.astype(np.float32), 32, axis=1
+    )[:, :k]
+    dense = dense.astype(dtype)
+    source = np.zeros((rows, k), dtype=np.float32)
+    columns = np.arange(rows) * 7 % k
+    columns[0] = k - 1
+    if rows > 2:
+        columns[1:3] = [min(31, k - 1), min(32, k - 1)]
+    source[np.arange(rows), columns] = 1
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["X"], ["typed_X"], to=element_type),
+            helper.make_node(
+                "MatMulNBits",
+                ["typed_X", "packed", "scales"],
+                ["typed_Y"],
+                domain="com.microsoft",
+                K=k,
+                N=n,
+                bits=4,
+                block_size=32,
+            ),
+            helper.make_node("Cast", ["typed_Y"], ["Y"], to=TensorProto.FLOAT),
+        ],
+        "packed_weight_rounding",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [rows, k])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [rows, n])],
+        initializer=[
+            numpy_helper.from_array(packed, "packed"),
+            helper.make_tensor(
+                "scales", element_type, scales.shape, scales.tobytes(), raw=True
+            ),
+        ],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("", 21),
+            helper.make_opsetid("com.microsoft", 1),
+        ],
+    )
+    model.ir_version = 10
+    reference = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("MatMul", ["X", "dense"], ["Y"])],
+            "independent_rounded_weights",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [rows, k])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [rows, n])],
+            initializer=[numpy_helper.from_array(dense.T.astype(np.float32), "dense")],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    reference.ir_version = 10
+    actual, expected = model_runner.run_sample(
+        model, [source], reference="cpu", reference_model=reference
+    )
+    np.testing.assert_array_equal(
+        actual[0].view(np.uint32), expected[0].view(np.uint32)
+    )
+
+
+@pytest.mark.parametrize("rows", [16, 17])
+def test_fp16_scales_preserve_rounding_across_gemv_boundary(model_runner, rows):
+    k, n = 32, 8
+    packed = np.full((n, 1, 16), 0x88, dtype=np.uint8)
+    packed[:, 0, 0] = 0x8B
+    scales = np.full((n, 1), 1.0003999471664429, dtype=np.float32).astype(np.float16)
+    source = np.zeros((rows, k), dtype=np.float32)
+    source[:, 0] = 1
+    dense = np.zeros((k, n), dtype=np.float32)
+    dense[0] = (
+        (np.float32(3) * scales[:, 0].astype(np.float32))
+        .astype(np.float16)
+        .astype(np.float32)
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["X"], ["typed_X"], to=TensorProto.FLOAT16),
+                helper.make_node(
+                    "MatMulNBits",
+                    ["typed_X", "packed", "scales"],
+                    ["typed_Y"],
+                    domain="com.microsoft",
+                    K=k,
+                    N=n,
+                    bits=4,
+                    block_size=32,
+                ),
+                helper.make_node("Cast", ["typed_Y"], ["Y"], to=TensorProto.FLOAT),
+            ],
+            "fp16_scale_boundary",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [rows, k])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [rows, n])],
+            initializer=[
+                numpy_helper.from_array(packed, "packed"),
+                numpy_helper.from_array(scales, "scales"),
+            ],
+        ),
+        opset_imports=[
+            helper.make_opsetid("", 21),
+            helper.make_opsetid("com.microsoft", 1),
+        ],
+    )
+    reference = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("MatMul", ["X", "dense"], ["Y"])],
+            "fp16_rounded_scale_reference",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [rows, k])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [rows, n])],
+            initializer=[numpy_helper.from_array(dense, "dense")],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    model.ir_version = reference.ir_version = 10
+    actual, expected = model_runner.run_sample(
+        model, [source], reference="cpu", reference_model=reference
+    )
+    np.testing.assert_array_equal(
+        actual[0].view(np.uint32), expected[0].view(np.uint32)
+    )
+
 
 # 1 is the row-major GEMV, 128 the WMMA path. 2/7/15 cover the tier between
 # them, where M is below the 16-row WMMA fragment so every tile is a partial
