@@ -80,6 +80,42 @@ __global__ void Validate(const int32_t *cumulative, const int32_t *past,
   }
 }
 
+__global__ void ValidateSingleInt8(
+    const int32_t *cumulative, const int32_t *past, const int32_t *table,
+    int tokens, int columns, int blocks, int page_size, int *error) {
+  const int start = cumulative[0];
+  const int end = cumulative[1];
+  const int prefix = past[0];
+  if (start != 0 || end != tokens || end <= start || prefix < 0 ||
+      prefix > 262144 || end - start > 262144 - prefix) {
+    if (threadIdx.x == 0)
+      atomicExch(error, -1);
+    return;
+  }
+  const int length = prefix + end - start;
+  if (static_cast<int64_t>(length) >
+      static_cast<int64_t>(columns) * page_size) {
+    if (threadIdx.x == 0)
+      atomicExch(error, -1);
+    return;
+  }
+  __shared__ unsigned seen[32];
+  if (threadIdx.x < 32)
+    seen[threadIdx.x] = 0;
+  __syncthreads();
+  const int pages = (length - 1) / page_size + 1;
+  for (int page = threadIdx.x; page < pages; page += blockDim.x) {
+    const int physical = table[page];
+    if (physical < 0 || physical >= blocks) {
+      atomicExch(error, -1);
+      continue;
+    }
+    const unsigned bit = 1u << (physical & 31);
+    if (atomicOr(&seen[physical / 32], bit) & bit)
+      atomicExch(error, -1);
+  }
+}
+
 __global__ void ValidateScales(const float *key, const float *value,
                                int channels, int *error, int residual_bits) {
   const int channel = blockIdx.x * blockDim.x + threadIdx.x;
@@ -831,12 +867,18 @@ extern "C" HIP_KERNEL_API int hip_paged_int8_append(
     return hipErrorInvalidValue;
   const auto hip_stream = static_cast<hipStream_t>(stream);
   (void)hipGetLastError();
-  const int validation_blocks =
-      (std::min(columns, 262144 / page_size) + kThreads - 1) / kThreads;
-  hipLaunchKernelGGL((Validate<262144>), dim3(batch, validation_blocks),
-                    dim3(kThreads), 0,
-                    hip_stream, cumulative, past, table, tokens, batch,
-                    columns, blocks, page_size, 262144, error);
+  if (batch == 1 && blocks <= 1024) {
+    hipLaunchKernelGGL(ValidateSingleInt8, dim3(1), dim3(kThreads), 0,
+                      hip_stream, cumulative, past, table, tokens, columns,
+                      blocks, page_size, error);
+  } else {
+    const int validation_blocks =
+        (std::min(columns, 262144 / page_size) + kThreads - 1) / kThreads;
+    hipLaunchKernelGGL((Validate<262144>), dim3(batch, validation_blocks),
+                      dim3(kThreads), 0,
+                      hip_stream, cumulative, past, table, tokens, batch,
+                      columns, blocks, page_size, 262144, error);
+  }
   auto status = hipGetLastError();
   if (status != hipSuccess)
     return hipdnn_device_execution_status(status);
