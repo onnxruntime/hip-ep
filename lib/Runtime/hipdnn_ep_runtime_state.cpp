@@ -2178,11 +2178,9 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
     state->execution_status = HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
     return HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED;
   }
-  const int status = state->execution_status;
   const int host_error = state->host_error_flag;
-  state->execution_status = 0;
   state->host_error_flag = 0;
-  return status != 0 ? status : host_error != 0 ? host_error : device_error;
+  return host_error != 0 ? host_error : device_error;
 }
 
 } // extern "C"

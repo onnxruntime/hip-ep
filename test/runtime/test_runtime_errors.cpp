@@ -103,9 +103,11 @@ int main() {
   fail_sync_after = -1;
   CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
   hipdnn_ep_state_record_execution_status(&state, -1);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -1);
-  CHECK(hipdnn_ep_state_get_execution_status(&state) == 0);
+  state.host_error_flag = -7;
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -7);
+  CHECK(hipdnn_ep_state_get_execution_status(&state) == -1);
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
+  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
 
   constexpr int64_t count = 512;
   constexpr int64_t capacity = 1024;

@@ -441,8 +441,8 @@ bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code);
-// Consume ordinary host/device/operator errors. Device execution failures stay
-// latched until explicit reset and are never hidden by a clear.
+// Consume host/device flags without clearing the execution-status latch.
+// Device execution failures remain visible until explicit reset.
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 void hipdnn_ep_state_record_execution_status(RuntimeState *state, int status);
 int hipdnn_ep_state_get_execution_status(RuntimeState *state);
