@@ -421,6 +421,43 @@ def test_allocator_memory_placement(paged_session, memory_type, expected, elemen
         gc.collect()
 
 
+def test_int8_single_query_matches_packed_peer(paged_session):
+    if not paged_session["quantized"]:
+        pytest.skip("INT8-cache query reuse only")
+    session, device = paged_session["session"], paged_session["device"]
+    packed = make_inputs(
+        [31, 17],
+        [1, 1],
+        separate=True,
+        dtype=np.float32,
+        quantized=True,
+        residual_bits=paged_session["residual_bits"],
+    )
+    single = packed.copy()
+    for name in ("query", "key", "value", "past", "table"):
+        single[name] = packed[name][:1]
+    single["cumulative"] = np.array([0, 1], dtype=np.int32)
+
+    results = []
+    for inputs in (single, packed):
+        binding, tensors, output = bind(session, device, inputs)
+        session.run_with_iobinding(binding)
+        results.append(
+            (
+                output.numpy(),
+                tensors["past_key"].numpy(),
+                tensors["past_value"].numpy(),
+            )
+        )
+    np.testing.assert_allclose(
+        results[0][0], reference(single)[0], atol=0.000002, rtol=0.00002
+    )
+    np.testing.assert_array_equal(results[0][0], results[1][0][:1])
+    for index in (1, 2):
+        pages = single["table"][0]
+        np.testing.assert_array_equal(results[0][index][pages], results[1][index][pages])
+
+
 @pytest.mark.parametrize(
     "prefixes,lengths", [([0], [7]), ([255, 510], [3, 5]), ([4095, 127], [1, 128])]
 )
