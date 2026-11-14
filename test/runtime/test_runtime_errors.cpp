@@ -154,11 +154,10 @@ int main() {
   CHECK(hipdnn_ep_op_states_alloc(&state, 1));
   CHECK(hipdnn_ep_op_state_construct_matmul_nbits(&state, 0) == 0);
   const auto matmul = [&](int slot, int64_t scale_bytes, const void *zeros) {
-    return wrap_matmul_nbits(&state, slot, data, data, data, zeros, nullptr,
-                             nullptr, values, 16, 64, 64, 1, 4, 32,
-                             HIPDNN_EP_DATATYPE_HALF, 1,
-                             scale_bytes == 4 ? HIPDNN_EP_DATATYPE_FLOAT
-                                              : HIPDNN_EP_DATATYPE_HALF);
+    return wrap_matmul_nbits(
+        &state, slot, data, data, data, zeros, nullptr, nullptr, values, 16, 64,
+        64, 1, 4, 32, HIPDNN_EP_DATATYPE_HALF, 1,
+        scale_bytes == 4 ? HIPDNN_EP_DATATYPE_FLOAT : HIPDNN_EP_DATATYPE_HALF);
   };
   CHECK(matmul(1, 2, nullptr) != 0);
   CHECK(state.host_error_flag != 0);

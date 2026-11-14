@@ -71,8 +71,7 @@ struct PagedAttentionToHip : RewritePattern {
         (bf16 ? (heads + kvHeads > 65535 || window <= 0 || window > 4096 ||
                  !std::isfinite(epsilon) || epsilon <= 0)
               : window != -1) ||
-        floating("softcap", 0) != 0 ||
-        integer("rotary_offset", 0) != 0 ||
+        floating("softcap", 0) != 0 || integer("rotary_offset", 0) != 0 ||
         (integer("v_head_size", 0) != 0 &&
          integer("v_head_size", 0) != headSize) ||
         !std::isfinite(scale) || scale < 0)
