@@ -421,9 +421,10 @@ def test_allocator_memory_placement(paged_session, memory_type, expected, elemen
         gc.collect()
 
 
-def test_int8_single_query_matches_packed_peer(paged_session):
+def test_int8_single_query_matches_packed_peer(paged_session, monkeypatch):
     if not paged_session["quantized"]:
         pytest.skip("INT8-cache query reuse only")
+    monkeypatch.setenv("HIPDNN_EP_EXPERIMENTAL_PAGED_DECODE", "0")
     session, device = paged_session["session"], paged_session["device"]
     packed = make_inputs(
         [31, 17],
@@ -455,7 +456,9 @@ def test_int8_single_query_matches_packed_peer(paged_session):
     np.testing.assert_array_equal(results[0][0], results[1][0][:1])
     for index in (1, 2):
         pages = single["table"][0]
-        np.testing.assert_array_equal(results[0][index][pages], results[1][index][pages])
+        np.testing.assert_array_equal(
+            results[0][index][pages], results[1][index][pages]
+        )
 
 
 @pytest.mark.parametrize(
@@ -736,6 +739,25 @@ def test_int8_decode_tiled_ragged_requests(paged_session):
     np.testing.assert_allclose(output.numpy(), expected, atol=0.000002, rtol=0.00002)
     np.testing.assert_array_equal(tensors["past_key"].numpy(), key)
     np.testing.assert_array_equal(tensors["past_value"].numpy(), value)
+
+
+def test_int8_decode_split_boundaries(paged_session):
+    if not paged_session["quantized"]:
+        pytest.skip("INT8 head-256 path only")
+    for prefix in (0, 2046, 2047, 2048, 16382, 16383, 16384):
+        inputs = make_inputs(
+            [prefix], [1], True, np.float32, True, paged_session["residual_bits"]
+        )
+        expected, key, value = reference(inputs)
+        binding, tensors, output = bind(
+            paged_session["session"], paged_session["device"], inputs
+        )
+        paged_session["session"].run_with_iobinding(binding)
+        np.testing.assert_allclose(
+            output.numpy(), expected, atol=0.000002, rtol=0.00002
+        )
+        np.testing.assert_array_equal(tensors["past_key"].numpy(), key)
+        np.testing.assert_array_equal(tensors["past_value"].numpy(), value)
 
 
 def test_int8_attention_workspace_tile_downshift(wide_paged_session):
