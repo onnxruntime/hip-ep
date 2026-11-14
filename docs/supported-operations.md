@@ -81,6 +81,13 @@ small-row, long-key tiles use more threads without changing precision.
 Ragged verification, page boundaries, cache aliases and invalid-metadata
 atomicity remain covered by the existing numeric tests.
 
+After successful device validation, a single request derives its cumulative
+vector as `[0, tokens]` instead of reading it back. Past-length/error readback
+and stream completion are unchanged. A single query already has the grouped
+head layout and can be borrowed when its address is aligned to 256 bytes;
+other queries retain explicit packing. Scratch reservations and arithmetic
+precision are unchanged.
+
 ### Experimental Qwen hybrid target operators
 
 The target-only hybrid path additionally implements these narrow contracts:
