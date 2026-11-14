@@ -226,6 +226,7 @@ extern "C" HIP_KERNEL_API int hip_paged_int8_decode(
   if ((reinterpret_cast<uintptr_t>(key) |
        reinterpret_cast<uintptr_t>(value)) & 3)
     return 0;
+#if defined(HIP_EP_PAGED_DECODE_GFX942) && HIP_EP_PAGED_DECODE_GFX942
   int device = 0;
   hipDeviceProp_t properties{};
   auto status = hipGetDevice(&device);
@@ -246,4 +247,7 @@ extern "C" HIP_KERNEL_API int hip_paged_int8_decode(
   MergeInt8Gqa6Mfma<<<dim3(1, 24), 256, 0, static_cast<hipStream_t>(stream)>>>(
       partials, output, 24, splits, error);
   return hipdnn_device_execution_status(hipGetLastError());
+#else
+  return 0;
+#endif
 }
