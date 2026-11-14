@@ -70,8 +70,8 @@ int wrap_paged_attention_int8(
       value_page_size != key_page_size || present_key_blocks != key_blocks ||
       present_value_blocks != key_blocks ||
       present_key_page_size != key_page_size ||
-      present_value_page_size != key_page_size || past_key != present_key ||
-      past_value != present_value)
+      present_value_page_size != key_page_size || past_key == past_value ||
+      past_key != present_key || past_value != present_value)
     return fail("invalid geometry, metadata extents or caller-bound aliases");
   const int cache_components = residual_bits ? 2 : 1;
   if (key_blocks >
@@ -217,8 +217,8 @@ int wrap_paged_attention_separate(
       value_page_size != key_page_size || present_key_blocks != key_blocks ||
       present_value_blocks != key_blocks ||
       present_key_page_size != key_page_size ||
-      present_value_page_size != key_page_size || past_key != present_key ||
-      past_value != present_value) {
+      present_value_page_size != key_page_size || past_key == past_value ||
+      past_key != present_key || past_value != present_value) {
     std::fprintf(stderr,
                  "HIP separate PagedAttention requires matching metadata, "
                  "Q/K/V and caller-bound cache aliases\n");
