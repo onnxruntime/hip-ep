@@ -251,14 +251,14 @@ static int RunPagedAttentionBf16(
       value_blocks != key_blocks || value_page_size != key_page_size ||
       present_key_blocks != key_blocks || present_value_blocks != key_blocks ||
       present_key_page_size != key_page_size ||
-      present_value_page_size != key_page_size || past_key != present_key ||
-      past_value != present_value || rotary_length <= 0 ||
-      rotary_length > INT_MAX || sin_length != rotary_length || heads <= 0 ||
-      heads > 65535 || kv_heads <= 0 || kv_heads > heads ||
-      heads + kv_heads > 65535 || heads % kv_heads != 0 ||
-      local_window_size <= 0 || local_window_size > 4096 ||
-      !std::isfinite(scale) || scale < 0 || !std::isfinite(qk_norm_epsilon) ||
-      qk_norm_epsilon <= 0 ||
+      present_value_page_size != key_page_size || past_key == past_value ||
+      past_key != present_key || past_value != present_value ||
+      rotary_length <= 0 || rotary_length > INT_MAX ||
+      sin_length != rotary_length || heads <= 0 || heads > 65535 ||
+      kv_heads <= 0 || kv_heads > heads || heads + kv_heads > 65535 ||
+      heads % kv_heads != 0 || local_window_size <= 0 ||
+      local_window_size > 4096 || !std::isfinite(scale) || scale < 0 ||
+      !std::isfinite(qk_norm_epsilon) || qk_norm_epsilon <= 0 ||
       key_blocks > INT64_MAX / (key_page_size * kv_heads * 128 * 2) ||
       static_cast<uint64_t>(tokens) >
           std::numeric_limits<size_t>::max() / sizeof(uint16_t) / heads / 128)

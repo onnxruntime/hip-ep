@@ -363,6 +363,7 @@ def test_bf16_windowed_attention(bf16_paged_session, prefixes, lengths):
         "cumulative",
         "negative_prefix",
         "write_alias",
+        "cross_cache_alias",
         "own_write_alias",
         "own_history_alias",
         "table_shape",
@@ -405,6 +406,10 @@ def test_bf16_attention_failure_is_atomic(bf16_paged_session, invalid):
     elif invalid == "value_shape":
         inputs["value"] = np.ascontiguousarray(inputs["query"][:-1, 5120:])
     with bind_windowed(bf16_paged_session, inputs) as bound:
+        if invalid == "cross_cache_alias":
+            key = bound["tensors"]["past_key"]
+            bound["binding"].bind_ortvalue_input("past_value", key)
+            bound["binding"].bind_ortvalue_output("present_value", key)
         with pytest.raises(RuntimeError, match="inference_compute .* failed"):
             bf16_paged_session["session"].run_with_iobinding(bound["binding"])
         for name in ("past_key", "past_value"):
