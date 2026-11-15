@@ -39,6 +39,7 @@ set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
     hip/paged_attention_kernel.hip
+    hip/paged_int8_decode_kernel.hip
     hip/qwen_hybrid_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
@@ -252,6 +253,12 @@ if(HIP_EP_RING_ENABLED)
 endif()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    set(_paged_decode_gfx942 0)
+    if(_arch STREQUAL "gfx942")
+        set(_paged_decode_gfx942 1)
+    endif()
+    set(_paged_decode_compile_option
+        -DHIP_EP_PAGED_DECODE_GFX942=${_paged_decode_gfx942})
     set(_ring_device_enabled 0)
     # gfx11-generic also runs on Strix Halo. Compile Ring into that release
     # slice, but retain the gfx1151-only device guard in ring_gqa.hip.
@@ -279,14 +286,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
-        COMPILE_OPTIONS ${_ring_compile_options}
+        COMPILE_OPTIONS ${_ring_compile_options} ${_paged_decode_compile_option}
         OFFLOAD_ARCHS
             ${_arch}
         DEPENDS
             HipSchemas
     )
-    if(HIP_EP_RING_ENABLED AND NOT WIN32)
-        target_compile_options(${_target} PRIVATE ${_ring_compile_options})
+    if(NOT WIN32)
+        target_compile_options(${_target} PRIVATE
+            ${_ring_compile_options} ${_paged_decode_compile_option})
     endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}

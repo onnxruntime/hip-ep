@@ -110,6 +110,16 @@ HIP_KERNEL_API int hip_paged_int8_append(
     const int32_t *table, const float *key_scale, const float *value_scale,
     int tokens, int batch, int columns, int blocks, int page_size, int kv_heads,
     int *error, int residual_bits);
+// Requires validated single-query, single-request, 24:4:H256 metadata and
+// heads*splits*258 scratch floats. Unsupported devices/alignment leave used=0
+// without submitting work; submitted execution failures must not fall back.
+HIP_KERNEL_API int hip_paged_int8_decode(
+    void *stream, const float *query, const int8_t *key, const int8_t *value,
+    const int32_t *cumulative, const int32_t *past, const int32_t *table,
+    const float *key_scale, const float *value_scale, float *partials,
+    float *output, int columns, int page_size, int splits, float scale,
+    const int *error, int residual, int *used);
+
 HIP_KERNEL_API int hip_paged_int8_pack_query(
     void *stream, const float *query, float *packed, int queries, int heads,
     int kv_heads, int *error);
