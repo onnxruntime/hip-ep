@@ -144,9 +144,13 @@ int wrap_paged_attention_int8(
   const auto cumulative_bytes =
       static_cast<size_t>(batch + 1) * sizeof(int32_t);
   const auto past_bytes = static_cast<size_t>(batch) * sizeof(int32_t);
+  // Single-request validation already proves cumulative == [0, tokens].
+  if (batch == 1)
+    lengths[1] = static_cast<int32_t>(tokens);
   const auto cumulative_status =
-      hipMemcpyAsync(lengths.data(), cumulative, cumulative_bytes,
-                     hipMemcpyDeviceToHost, hip_stream);
+      batch == 1 ? hipSuccess
+                 : hipMemcpyAsync(lengths.data(), cumulative, cumulative_bytes,
+                                  hipMemcpyDeviceToHost, hip_stream);
   const auto past_status =
       hipMemcpyAsync(lengths.data() + batch + 1, past_lengths, past_bytes,
                      hipMemcpyDeviceToHost, hip_stream);
@@ -180,10 +184,17 @@ int wrap_paged_attention_int8(
                                 static_cast<int64_t>(begin) * heads * 256;
       auto *output_begin = static_cast<float *>(output) +
                            static_cast<int64_t>(begin) * heads * 256;
-      if (execute(hip_paged_int8_pack_query(
-              stream, query_begin, packed_query, queries,
-              static_cast<int>(heads), static_cast<int>(kv_heads), error)) != 0)
+      const float *query_matrix = packed_query;
+      // One query already has the grouped head layout.
+      if (tokens == 1 &&
+          (reinterpret_cast<uintptr_t>(query_begin) & 255) == 0) {
+        query_matrix = query_begin;
+      } else if (execute(hip_paged_int8_pack_query(
+                     stream, query_begin, packed_query, queries,
+                     static_cast<int>(heads), static_cast<int>(kv_heads),
+                     error)) != 0) {
         return fail("query packing failed");
+      }
       for (int key_begin = 0; key_begin < total; key_begin += key_tile) {
         const int keys = std::min(key_tile, total - key_begin);
         if (execute(hip_paged_int8_pack_cache(
@@ -196,7 +207,7 @@ int wrap_paged_attention_int8(
                 packed_value, key_begin, keys, static_cast<int>(key_page_size),
                 static_cast<int>(kv_heads), error,
                 static_cast<int>(residual_bits))) != 0 ||
-            wrap_hipblasLtMatmul(state, op_state_slot, packed_query, packed_key,
+            wrap_hipblasLtMatmul(state, op_state_slot, query_matrix, packed_key,
                                  scores, rows, keys, 256, kv_heads,
                                  HIPDNN_EP_DATATYPE_FLOAT,
                                  static_cast<int64_t>(keys) * 256, 0, 1) != 0 ||
