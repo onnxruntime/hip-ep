@@ -8729,7 +8729,8 @@ __global__ void matmul_u4_block32_typed_small_m(
     uint32_t packed;
     __builtin_memcpy(&packed, weights + channel * groups * 16 + column / 2,
                      sizeof(packed));
-    const float scale = static_cast<float>(scales[channel * groups + column / 32]);
+    const Scale stored_scale = scales[channel * groups + column / 32];
+    const float scale = static_cast<float>(stored_scale);
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
       if constexpr (Rows > 1) {
@@ -8758,20 +8759,88 @@ __global__ void matmul_u4_block32_typed_small_m(
               packed_values.x, packed_values.y, packed_values.z, packed_values.w};
 #pragma unroll
           for (int i = 0; i < 4; ++i) {
-            values[2 * i] = __uint_as_float(pairs[i] << 16);
-            values[2 * i + 1] = __uint_as_float(pairs[i] & 0xffff0000u);
+            if constexpr (std::is_same_v<Activation, _Float16>) {
+              values[2 * i] = static_cast<float>(__builtin_bit_cast(
+                  _Float16, static_cast<uint16_t>(pairs[i])));
+              values[2 * i + 1] = static_cast<float>(__builtin_bit_cast(
+                  _Float16, static_cast<uint16_t>(pairs[i] >> 16)));
+            } else {
+              values[2 * i] = __uint_as_float(pairs[i] << 16);
+              values[2 * i + 1] = __uint_as_float(pairs[i] & 0xffff0000u);
+            }
           }
         }
       }
+      if constexpr (std::is_same_v<Activation, _Float16> &&
+                    std::is_same_v<Scale, _Float16>) {
+        const __half2 scale_pair =
+            __half2half2(__builtin_bit_cast(__half, stored_scale));
 #pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        if (AlignedK || column + i < k) {
-          const float weight = static_cast<float>(Activation(
-              (static_cast<int>((packed >> (i * 4)) & 15) - 8) * scale));
-          const float value =
-              AlignedK ? values[i] :
-              static_cast<float>(activations[(row + r) * k + column + i]);
-          sums[r][i % 4] = fmaf(value, weight, sums[r][i % 4]);
+        for (int i = 0; i < 8; i += 2) {
+          const uint32_t byte = packed >> (i * 4);
+          // 0x6400 | q is exactly 1024 + q in FP16. Subtraction is exact;
+          // the packed multiply retains the original FP16 weight rounding.
+          const uint32_t encoded =
+              0x64006400u | (byte & 15u) | ((byte & 240u) << 12);
+          const __half2 integers =
+              __hsub2(__builtin_bit_cast(__half2, encoded),
+                      __builtin_bit_cast(__half2, uint32_t{0x64086408u}));
+          const float2 pair = __half22float2(__hmul2(integers, scale_pair));
+          if (AlignedK || column + i < k) {
+            const float value =
+                AlignedK ? values[i] :
+                static_cast<float>(activations[(row + r) * k + column + i]);
+            sums[r][i % 4] = fmaf(value, pair.x, sums[r][i % 4]);
+          }
+          if (AlignedK || column + i + 1 < k) {
+            const float value =
+                AlignedK ? values[i + 1] :
+                static_cast<float>(activations[(row + r) * k + column + i + 1]);
+            sums[r][(i + 1) % 4] =
+                fmaf(value, pair.y, sums[r][(i + 1) % 4]);
+          }
+        }
+      } else if constexpr (std::is_same_v<Activation, __hip_bfloat16>) {
+        const auto accumulate = [&](auto finite_bfloat_tag) {
+          constexpr bool finite_bfloat = decltype(finite_bfloat_tag)::value;
+#pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            if (AlignedK || column + i < k) {
+              const float unrounded =
+                  (static_cast<int>((packed >> (i * 4)) & 15) - 8) * scale;
+              float weight;
+              if constexpr (finite_bfloat) {
+                // Finite scale times an integer cannot produce NaN. Round in
+                // FP32 bits, avoiding eight repeated BF16 NaN conversions.
+                const uint32_t bits = __float_as_uint(unrounded);
+                weight = __uint_as_float(
+                    (bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
+              } else {
+                weight = static_cast<float>(Activation(unrounded));
+              }
+              const float value =
+                  AlignedK ? values[i] :
+                  static_cast<float>(activations[(row + r) * k + column + i]);
+              sums[r][i % 4] = fmaf(value, weight, sums[r][i % 4]);
+            }
+          }
+        };
+        if (isfinite(scale))
+          accumulate(std::true_type{});
+        else
+          accumulate(std::false_type{});
+      } else {
+        // Sharing the BF16 lambda regresses FP32 GEMV throughput.
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          if (AlignedK || column + i < k) {
+            const float weight = static_cast<float>(Activation(
+                (static_cast<int>((packed >> (i * 4)) & 15) - 8) * scale));
+            const float value =
+                AlignedK ? values[i] :
+                static_cast<float>(activations[(row + r) * k + column + i]);
+            sums[r][i % 4] = fmaf(value, weight, sums[r][i % 4]);
+          }
         }
       }
     }
@@ -8795,7 +8864,9 @@ extern "C" HIP_KERNEL_API int hip_matmul_nbits_gemv_typed(
     int activation_dtype, int scale_dtype) {
   if (!stream || !activations || !weights || !scales || !output || m <= 0 ||
       m > 16 || n <= 0 || k <= 0 ||
-      (activation_dtype != HIP_DTYPE_FLOAT32 && activation_dtype != HIP_DTYPE_BFLOAT16) ||
+      (activation_dtype != HIP_DTYPE_FLOAT32 &&
+       activation_dtype != HIP_DTYPE_FLOAT16 &&
+       activation_dtype != HIP_DTYPE_BFLOAT16) ||
       (scale_dtype != HIP_DTYPE_FLOAT16 && scale_dtype != HIP_DTYPE_FLOAT32 &&
        scale_dtype != HIP_DTYPE_BFLOAT16))
     return hipErrorInvalidValue;
@@ -8837,6 +8908,8 @@ extern "C" HIP_KERNEL_API int hip_matmul_nbits_gemv_typed(
   };
   if (activation_dtype == HIP_DTYPE_FLOAT32)
     dispatch_scales(float{});
+  else if (activation_dtype == HIP_DTYPE_FLOAT16)
+    dispatch_scales(_Float16{});
   else
     dispatch_scales(__hip_bfloat16{});
   return hipdnn_device_execution_status(hipGetLastError());
