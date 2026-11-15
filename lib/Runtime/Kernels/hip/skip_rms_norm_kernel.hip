@@ -71,12 +71,19 @@ __device__ inline void skip_store(__hip_bfloat16 *p, float v) {
 __device__ inline float skip_block_sum(float partial, float *s_reduce) {
   s_reduce[threadIdx.x] = partial;
   __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+  const int width = warpSize;
+  for (int stride = blockDim.x / 2; stride >= width; stride >>= 1) {
     if (threadIdx.x < stride)
       s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
     __syncthreads();
   }
-  return s_reduce[0];
+  float sum = s_reduce[threadIdx.x];
+  if (threadIdx.x < width) {
+    // Keep the original binary-tree addition order; only thread zero consumes it.
+    for (int offset = width / 2; offset > 0; offset >>= 1)
+      sum += __shfl_down(sum, offset, width);
+  }
+  return sum;
 }
 
 // One block per row. blockDim.x is a power of two up to
