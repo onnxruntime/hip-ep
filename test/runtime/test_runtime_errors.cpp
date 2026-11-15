@@ -89,15 +89,28 @@ int main() {
   }
   state.host_error_flag = -7;
   fail_sync_after = 0;
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
   CHECK(state.host_error_flag == -7);
+  CHECK(hipdnn_ep_state_get_execution_status(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+        HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+  state.host_error_flag = -7;
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -7);
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
   fail_sync_after = -1;
   CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+  hipdnn_ep_state_record_execution_status(&state, -1);
+  state.host_error_flag = -7;
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == -7);
+  CHECK(hipdnn_ep_state_get_execution_status(&state) == -1);
+  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
+  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
 
   constexpr int64_t count = 512;
-  constexpr int64_t capacity = 1024;
+  constexpr int64_t capacity = 4096;
   void *data = nullptr, *values = nullptr, *indices = nullptr, *k = nullptr;
   CHECK(hipMalloc(&data, capacity * sizeof(float)) == hipSuccess);
   CHECK(hipMalloc(&values, capacity * sizeof(float)) == hipSuccess);
@@ -140,44 +153,61 @@ int main() {
   CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
   CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
 
-  CHECK(hipdnn_ep_op_states_alloc(&state, 1));
-  CHECK(hipdnn_ep_op_state_construct_matmul_nbits(&state, 0) == 0);
-  const auto matmul = [&](int slot, int64_t scale_bytes, const void *zeros) {
-    return wrap_matmul_nbits(&state, slot, data, data, data, zeros, nullptr,
-                             nullptr, values, 16, 64, 64, 1, 4, 32, 2, 1,
-                             scale_bytes);
-  };
-  CHECK(matmul(1, 2, nullptr) != 0);
-  CHECK(state.host_error_flag != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
-  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
-  fail_allocation = true;
-  CHECK(matmul(0, 4, nullptr) != 0);
-  CHECK(state.host_error_flag != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
-  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
-  CHECK(matmul(0, 2, data) != 0);
-  CHECK(state.host_error_flag != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
-  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
-  fail_allocation = false;
-  // Valid op state but no hipBLASLt handle: prefill returns a terminal error.
-  CHECK(matmul(0, 2, nullptr) != 0);
-  CHECK(state.host_error_flag != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
-  CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
-  CHECK(hipblasLtCreate(&state.hipblas_handle) == HIPBLAS_STATUS_SUCCESS);
-  CHECK(matmul(0, 2, nullptr) != 0);
-  CHECK(matmul_calls > 0);
-  CHECK(state.host_error_flag != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
-  CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
+  int device = 0;
+  hipDeviceProp_t properties{};
+  CHECK(hipGetDevice(&device) == hipSuccess);
+  CHECK(hipGetDeviceProperties(&properties, device) == hipSuccess);
+  if (properties.warpSize == 64) {
+    CHECK(hipdnn_ep_op_states_alloc(&state, 1));
+    CHECK(hipdnn_ep_op_state_construct_matmul_nbits(&state, 0) == 0);
+    const auto matmul = [&](int slot, int64_t scale_bytes, const void *zeros) {
+      return wrap_matmul_nbits(&state, slot, data, data, data, zeros, nullptr,
+                               nullptr, values, 64, 64, 64, 1, 4, 32,
+                               HIPDNN_EP_DATATYPE_HALF, 1,
+                               scale_bytes == 4 ? HIPDNN_EP_DATATYPE_FLOAT
+                                                : HIPDNN_EP_DATATYPE_HALF);
+    };
+    CHECK(matmul(1, 2, nullptr) != 0);
+    CHECK(state.host_error_flag != 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+    CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+    fail_allocation = true;
+    CHECK(matmul(0, 4, nullptr) != 0);
+    CHECK(state.host_error_flag != 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+    CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+    CHECK(matmul(0, 2, data) != 0);
+    CHECK(state.host_error_flag != 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+    CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+    fail_allocation = false;
+    // Valid op state but no hipBLASLt handle: prefill returns a terminal error.
+    CHECK(matmul(0, 2, nullptr) != 0);
+    CHECK(state.host_error_flag != 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) != 0);
+    CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+    CHECK(hipblasLtCreate(&state.hipblas_handle) == HIPBLAS_STATUS_SUCCESS);
+    CHECK(matmul(0, 2, nullptr) != 0);
+    CHECK(matmul_calls > 0);
+    CHECK(state.host_error_flag != 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+          HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+    CHECK(hipdnn_ep_state_get_execution_status(&state) ==
+          HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) ==
+          HIPDNN_EP_ERR_DEVICE_EXECUTION_FAILED);
+    CHECK(hipdnn_ep_state_reset_error_flag(&state) == 0);
+    CHECK(hipdnn_ep_state_read_and_clear_error_flag(&state) == 0);
 
-  CHECK(hipblasLtDestroy(state.hipblas_handle) == HIPBLAS_STATUS_SUCCESS);
-  state.op_states[0]->deletor(state.op_states[0]);
-  std::free(state.op_states);
+    CHECK(hipblasLtDestroy(state.hipblas_handle) == HIPBLAS_STATUS_SUCCESS);
+    state.op_states[0]->deletor(state.op_states[0]);
+    std::free(state.op_states);
+  } else {
+    std::puts("Skipping wave64-specific BLAS prefill fault cases");
+  }
   CHECK(hipFree(state.workspace) == hipSuccess);
-  CHECK(hipFree(state.matmul_nbits_fp16_scratch) == hipSuccess);
+  if (state.matmul_nbits_fp16_scratch)
+    CHECK(hipFree(state.matmul_nbits_fp16_scratch) == hipSuccess);
   CHECK(hipFree(data) == hipSuccess);
   CHECK(hipFree(values) == hipSuccess);
   CHECK(hipFree(indices) == hipSuccess);
