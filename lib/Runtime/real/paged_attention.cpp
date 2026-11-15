@@ -171,6 +171,34 @@ int wrap_paged_attention_int8(
   if (execution_error)
     return fail("invalid page metadata or nonpositive/nonfinite cache scales");
 
+  const char *experimental_decode =
+      std::getenv("HIPDNN_EP_EXPERIMENTAL_PAGED_DECODE");
+  if (experimental_decode && experimental_decode[0] == '1' &&
+      experimental_decode[1] == '\0' && tokens == 1 && batch == 1 &&
+      heads == 24 && kv_heads == 4) {
+    const int context = lengths[2] + 1;
+    const int splits = context <= 2048 ? 64 : context <= 16384 ? 128 : 512;
+    if (static_cast<size_t>(heads) * splits * 258 <= elements) {
+      int used = 0;
+      if (execute(hip_paged_int8_decode(
+              stream, static_cast<const float *>(query),
+              static_cast<const int8_t *>(past_key),
+              static_cast<const int8_t *>(past_value),
+              static_cast<const int32_t *>(cumulative),
+              static_cast<const int32_t *>(past_lengths),
+              static_cast<const int32_t *>(table),
+              static_cast<const float *>(key_scale),
+              static_cast<const float *>(value_scale), scratch,
+              static_cast<float *>(output), static_cast<int>(table_columns),
+              static_cast<int>(key_page_size), splits,
+              scale == 0 ? 0.0625f : scale, error,
+              static_cast<int>(residual_bits), &used)) != 0)
+        return fail("experimental paged decode execution failed");
+      if (used)
+        return 0;
+    }
+  }
+
   const int groups = static_cast<int>(heads / kv_heads);
   for (int request = 0; request < batch; ++request) {
     const int start = lengths[request];

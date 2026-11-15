@@ -88,6 +88,23 @@ head layout and can be borrowed when its address is aligned to 256 bytes;
 other queries retain explicit packing. Scratch reservations and arithmetic
 precision are unchanged.
 
+### Experimental gfx942 grouped decode
+
+`HIPDNN_EP_EXPERIMENTAL_PAGED_DECODE=1` opts into fused FP32 MFMA decode
+for one request containing one query, 24 query heads, four KV heads and head
+size 256 on gfx942. The flag is disabled by default; only the exact value `1`
+enables it. Both ordinary INT8 and residual8 caches retain per-element FP32
+dequantization. Unsupported geometry, architecture or alignment falls back
+to the existing path; failures after submission remain execution failures.
+Cache validation, append, error readback, completion and workspace reservation
+are unchanged.
+
+The kernel changes FP32 summation order. Matching greedy output on one
+workload is not numerical or task-quality qualification, especially when
+later boundaries round to FP16 or BF16. The measured FP16 16K and six of seven
+BF16 context cases changed output; keep this path experimental and default-off
+pending separate precision, serving and task-quality qualification.
+
 ### Experimental Qwen hybrid target operators
 
 The target-only hybrid path additionally implements these narrow contracts:
