@@ -30,7 +30,7 @@ Output rows must match query rows; a dynamic query row count requires a dynamic
 output row count. Optional `int32[2]` or `int32[3]` `attention_metadata` is accepted as a
 performance hint. This path derives execution bounds from tensor shapes and
 device sequence lengths instead of consuming that hint.
-Nonzero rotary offsets, value head sizes other than 0 (default) or 64, and
+Nonzero rotary offsets, value head sizes other than 0 (default) or the query head size, and
 negative or non-finite attention scales are rejected during conversion.
 
 The caller must bind each present cache to the corresponding past allocation.
@@ -40,6 +40,12 @@ extents, duplicate pages, and cross-request writes that would overlap a peer's
 live state. Shared read-only prefix pages are allowed. Malformed metadata returns
 an execution error without modifying caches; the same session can then run valid
 inputs.
+
+Single-request INT8-cache validation uses a 128-byte shared bitmap when the
+cache contains at most 1,024 physical pages. It checks the same sequence bounds,
+page bounds and duplicate-page contract before any cache write. Larger caches
+and multiple requests retain the general validator, including cross-request
+write protection.
 
 The output-allocator execution boundary drains its inference stream before returning,
 including when the compiled function fails or throws, and clears its borrowed

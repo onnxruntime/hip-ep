@@ -259,12 +259,13 @@ def reference(inputs):
     residual = quantized and inputs["past_key"].shape[-1] == 2 * head_size
     key = inputs["past_key"].copy()
     value = inputs["past_value"].copy()
+    page_size = key.shape[1]
     output = []
     for row, prefix in enumerate(inputs["past"]):
         start, end = inputs["cumulative"][row : row + 2]
         for token in range(start, end):
             position = int(prefix + token - start)
-            slot = (inputs["table"][row, position // 256], position % 256)
+            slot = (inputs["table"][row, position // page_size], position % page_size)
             if separate:
                 for cache, kind in ((key, "key"), (value, "value")):
                     values = inputs[kind][token].reshape(kv_heads, head_size)
@@ -293,10 +294,10 @@ def reference(inputs):
                 value[slot] = qkv[16:]
                 query = rotate(qkv[:14], cosine, sine).astype(np.float32)
             positions = np.arange(position + 1)
-            pages = inputs["table"][row, positions // 256]
+            pages = inputs["table"][row, positions // page_size]
             if quantized:
-                keys = key[pages, positions % 256].astype(np.float32)
-                values = value[pages, positions % 256].astype(np.float32)
+                keys = key[pages, positions % page_size].astype(np.float32)
+                values = value[pages, positions % page_size].astype(np.float32)
                 if residual:
                     keys = 256 * keys[..., :head_size] + keys[..., head_size:] + 128
                     values = (
@@ -320,12 +321,12 @@ def reference(inputs):
                 )
                 continue
             keys = (
-                key[pages, positions % 256]
+                key[pages, positions % page_size]
                 .astype(np.float32)
                 .repeat(heads // kv_heads, axis=1)
             )
             values = (
-                value[pages, positions % 256]
+                value[pages, positions % page_size]
                 .astype(np.float32)
                 .repeat(heads // kv_heads, axis=1)
             )
@@ -536,6 +537,78 @@ def test_paged_attention_shared_read_only_prefix(paged_session):
     np.testing.assert_allclose(
         tensors["past_key"].numpy(), key, atol=0.0005, rtol=0.005, equal_nan=True
     )
+    np.testing.assert_array_equal(tensors["past_value"].numpy(), value)
+
+
+@pytest.mark.parametrize("blocks", [1023, 1024, 1025])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        "duplicate",
+        "physical_negative",
+        "physical_end",
+        "start",
+        "end",
+        "prefix",
+        "capacity",
+        "scale",
+    ],
+)
+def test_int8_single_sequence_validation_boundary(paged_session, blocks, invalid):
+    if not paged_session["quantized"]:
+        pytest.skip("INT8 head-256 path only")
+    inputs = make_inputs(
+        [47], [1], True, np.float32, True, paged_session["residual_bits"]
+    )
+    table = np.array([[31, 32, blocks - 1]], dtype=np.int32)
+    for name in ("past_key", "past_value"):
+        old = inputs[name]
+        cache = np.full((blocks, 16, *old.shape[2:]), -128, dtype=np.int8)
+        for position in range(47):
+            cache[table[0, position // 16], position % 16] = old[
+                inputs["table"][0, 0], position
+            ]
+        inputs[name] = cache
+    inputs["table"] = table
+    valid_controls = {
+        name: inputs[name].copy()
+        for name in ("table", "cumulative", "past", "key_scale")
+    }
+    if invalid == "duplicate":
+        inputs["table"][0, 2] = inputs["table"][0, 0]
+    elif invalid == "physical_negative":
+        inputs["table"][0, 0] = -1
+    elif invalid == "physical_end":
+        inputs["table"][0, 2] = blocks
+    elif invalid == "start":
+        inputs["cumulative"][0] = 1
+    elif invalid == "end":
+        inputs["cumulative"][1] = 2
+    elif invalid == "prefix":
+        inputs["past"][0] = 262144
+    elif invalid == "capacity":
+        inputs["past"][0] = 48
+    elif invalid == "scale":
+        inputs["key_scale"][0, 0, 0] = np.nan
+    session, device = paged_session["session"], paged_session["device"]
+    if invalid is not None:
+        binding, tensors, output = bind(session, device, inputs)
+        with pytest.raises(
+            RuntimeError, match="inference_compute .* failed with code: -1"
+        ):
+            session.run_with_iobinding(binding)
+        np.testing.assert_array_equal(tensors["past_key"].numpy(), inputs["past_key"])
+        np.testing.assert_array_equal(
+            tensors["past_value"].numpy(), inputs["past_value"]
+        )
+        assert np.isnan(output.numpy()).all()
+        inputs.update(valid_controls)
+    expected, key, value = reference(inputs)
+    binding, tensors, output = bind(session, device, inputs)
+    session.run_with_iobinding(binding)
+    np.testing.assert_allclose(output.numpy(), expected, atol=0.000002, rtol=0.00002)
+    np.testing.assert_array_equal(tensors["past_key"].numpy(), key)
     np.testing.assert_array_equal(tensors["past_value"].numpy(), value)
 
 
